@@ -266,6 +266,27 @@ export default function GenerateBill() {
     setItems((prev) => (mode === "append" ? [...prev, ...derived] : derived));
   };
 
+
+    // 🔄 Auto-set baseCost from current therapies when a case is selected
+  useEffect(() => {
+    // need full case + therapy_plan
+    if (!caseDetail?.therapy_plan?.length) return;
+
+    // don't override if there's already a saved bill for this case
+    if (existingBill) return;
+
+    // derive billable items from plan, then sum them
+    const derived = buildItemsFromPlan(caseDetail.therapy_plan);
+    const autoCost = derived.reduce(
+      (sum, it) =>
+        sum + (Number(it.quantity) || 0) * (Number(it.rate) || 0),
+      0
+    );
+
+    setBaseCost(autoCost ? String(autoCost) : "");
+  }, [caseDetail, existingBill]);
+
+
   // calculations
   const itemsSubtotal = useMemo(
     () => items.reduce((sum, it) => sum + (Number(it.quantity) || 0) * (Number(it.rate) || 0), 0),
@@ -485,7 +506,7 @@ export default function GenerateBill() {
               <span>
                 For{" "}
                 <span className="font-semibold text-gray-700">
-                  {caseDetail?.patient_name || selectedCaseBrief?.patient_name || "—"}
+                  {caseDetail?.patient_name || selectedCaseBrief?.patient_name || selectedCaseBrief?.p_id}
                 </span>{" "}
                 (Case #{selectedCaseId})
               </span>
@@ -524,15 +545,17 @@ export default function GenerateBill() {
               <option value="" disabled>
                 {casesLoading ? "Loading cases..." : "Choose a case"}
               </option>
+              {console.log(cases)
+              }
               {cases.map((c) => (
                 <option key={c._id} value={c._id}>
-                  {c.patient_name} • {c.patient_phone || "N/A"} • {c.case_type || "—"}
+                  {c.patient_name} • {c.p_id || "—"}
                 </option>
               ))}
             </select>
 
             {/* Case Cost */}
-            <div className="mt-4">
+            {/* <div className="mt-4">
               <label className="text-sm text-gray-600 mb-1 block">
                 Case Cost (₹) <span className="text-red-500">*</span>
               </label>
@@ -565,7 +588,7 @@ export default function GenerateBill() {
               <p className="text-xs text-gray-500 mt-1">
                 This will be added as the first line item: “Case cost”.
               </p>
-            </div>
+            </div> */}
 
             {/* Import from Plan */}
             <div className="mt-6 border-t pt-4">

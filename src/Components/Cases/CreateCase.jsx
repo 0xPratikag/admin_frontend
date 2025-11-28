@@ -12,8 +12,7 @@ const baseInputCls = "border rounded w-full p-2 focus:outline-none transition";
 const normalBorder = "border-gray-300 focus:ring-2 focus:ring-indigo-500";
 const errorBorder = "border-red-500 focus:ring-2 focus:ring-red-500";
 
-// Keep server and client format expectations aligned
-const PID_REGEX = /^PID-\d{2}-[A-Z0-9]{6}$/;
+// ❌ Removed PID_REGEX – we don't restrict format for Client ID
 
 const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL });
 
@@ -28,7 +27,7 @@ export default function CreateCase() {
   );
 
   const [formData, setFormData] = useState({
-    p_id: "", // server-generated on update mode; on create, user may set
+    p_id: "", // internally still p_id, UI shows "Client ID"
     patient_name: "",
     patient_phone: "",
     patient_phone_alt: "",
@@ -69,7 +68,7 @@ export default function CreateCase() {
   // Conditions chip input
   const [conditionInput, setConditionInput] = useState("");
 
-  // P.ID verify UI state
+  // Client ID verify UI state (was P.ID)
   const [pidStatus, setPidStatus] = useState({ state: "idle", msg: "" });
   // states: idle | checking | available | unavailable | invalid | error
 
@@ -225,10 +224,7 @@ export default function CreateCase() {
       const v = get(data, key);
       if (v === undefined || v === null || String(v).trim() === "") {
         const label = key
-          .split(".")
-          .slice(-1)[0]
-          .replace("_", " ")
-          .replace(/\b\w/g, (c) => c.toUpperCase());
+
         nextErrors[key] = `Please fill this field (${label}).`;
       }
     });
@@ -245,10 +241,7 @@ export default function CreateCase() {
       }
     }
 
-    // client-side P.ID sanity (if user typed something)
-    if (!isUpdate && data.p_id && !PID_REGEX.test(String(data.p_id).trim().toUpperCase())) {
-      nextErrors["p_id"] = "Invalid P.ID format. Expected PID-YY-XXXXXX";
-    }
+    // ✅ No client-side format restriction for Client ID now
 
     // (Optional) Basic therapy plan validation — ensure no invalid IDs
     if (therapyPlan.length) {
@@ -277,8 +270,9 @@ export default function CreateCase() {
     clearError(name);
   };
 
+  // Client ID change (no uppercase, no restriction)
   const handlePidChange = (e) => {
-    const val = e.target.value.toUpperCase();
+    const val = e.target.value;
     setFormData((p) => ({ ...p, p_id: val }));
     clearError("p_id");
     // reset verify state whenever user types
@@ -462,23 +456,23 @@ export default function CreateCase() {
   const fieldCls = (key) => `${baseInputCls} ${errors[key] ? errorBorder : normalBorder}`;
   const ErrorText = ({ msg }) => (msg ? <p className="text-sm text-red-600 mt-1">{msg}</p> : null);
 
-  // ---------- P.ID verify call ----------
+  // ---------- Client ID verify call (was P.ID) ----------
   const verifyPid = async () => {
+
+    console.log(formData.p_id);
+    
     try {
-      const val = String(formData.p_id || "").trim().toUpperCase();
+      const val = String(formData.p_id || "");
       if (!val) {
-        setPidStatus({ state: "invalid", msg: "Enter a P.ID to verify" });
+        setPidStatus({ state: "invalid", msg: "Enter a Client ID to verify" });
         return;
       }
-      if (!PID_REGEX.test(val)) {
-        setPidStatus({ state: "invalid", msg: "Invalid format. Expected PID-YY-XXXXXX" });
-        return;
-      }
+
       setPidStatus({ state: "checking", msg: "Checking..." });
 
       const res = await api.get(`/cases/verify-pid`, {
         headers: authHeaders,
-        params: { p_id: val },
+        params: { p_id: val }, // backend still expects p_id
       });
       if (res.data?.available) {
         setPidStatus({ state: "available", msg: "Available" });
@@ -510,9 +504,12 @@ export default function CreateCase() {
       return;
     }
 
-    // If user typed a P.ID, require successful verification
+    // If user typed a Client ID, require successful verification
     if (!isUpdate && formData.p_id && pidStatus.state !== "available") {
-      setErrors((p) => ({ ...p, p_id: "Please click Verify and ensure the P.ID is available." }));
+      setErrors((p) => ({
+        ...p,
+        p_id: "Please click Verify and ensure the Client ID is available.",
+      }));
       const el = document.getElementById(idFromKey("p_id"));
       if (el) el.focus();
       return;
@@ -521,8 +518,8 @@ export default function CreateCase() {
     try {
       // Build payload to match backend contract
       const payload = {
-        // ✅ send p_id if user set one; server will still enforce uniqueness
-        p_id: formData.p_id ? String(formData.p_id).toUpperCase() : undefined,
+        // send p_id if user set one; server will still enforce uniqueness
+        p_id: formData.p_id ? String(formData.p_id) : undefined,
 
         patient_name: formData.patient_name,
         patient_phone: formData.patient_phone,
@@ -571,20 +568,28 @@ export default function CreateCase() {
             </span>
           </div>
 
-          {success && <div className="bg-green-50 border border-green-400 text-green-700 p-3 rounded">{success}</div>}
-          {error && <div className="bg-red-50 border border-red-400 text-red-700 p-3 rounded">{error}</div>}
+          {success && (
+            <div className="bg-green-50 border border-green-400 text-green-700 p-3 rounded">
+              {success}
+            </div>
+          )}
+          {error && (
+            <div className="bg-red-50 border border-red-400 text-red-700 p-3 rounded">
+              {error}
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} noValidate className="space-y-10">
             {/* Patient Info */}
             <section className="space-y-4">
-              <h2 className="text-xl font-semibold text-gray-800">👤 Patient Details</h2>
+              <h2 className="text-xl font-semibold text-gray-800">👤 Client Details</h2>
 
-              {/* P.ID (Create mode) */}
+              {/* Client ID (Create mode) */}
               {!isUpdate && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="text-sm text-gray-700 mb-1 block">
-                      P.ID (optional, click Verify)
+                      Client ID (optional, click Verify)
                     </label>
                     <div className="flex gap-2">
                       <input
@@ -593,7 +598,7 @@ export default function CreateCase() {
                         name="p_id"
                         value={formData.p_id}
                         onChange={handlePidChange}
-                        placeholder="e.g., PID-25-10A3F2"
+                        placeholder="Enter Client ID (e.g., 1, ABC123)"
                         className={fieldCls("p_id")}
                       />
                       <button
@@ -623,18 +628,19 @@ export default function CreateCase() {
                       )}
                     </div>
                     <p className="text-xs text-gray-500 mt-1">
-                      Format: <code>PID-YY-XXXXXX</code> (YY = year, X = letter/digit). Leave blank to auto-generate.
+                      Client ID is a unique code for this client. Leave blank to auto-generate on the
+                      server.
                     </p>
                     <ErrorText msg={errors["p_id"]} />
                   </div>
                 </div>
               )}
 
-              {/* Show P.ID when editing */}
+              {/* Show Client ID when editing */}
               {isUpdate && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="text-sm text-gray-700 mb-1 block">P.ID</label>
+                    <label className="text-sm text-gray-700 mb-1 block">Client ID</label>
                     <input
                       id={idFromKey("p_id")}
                       type="text"
@@ -643,12 +649,12 @@ export default function CreateCase() {
                       readOnly
                       disabled
                       className={`${baseInputCls} ${normalBorder} bg-gray-100`}
-                      placeholder="P.ID"
-                      title="Unique Patient ID (auto-generated)"
+                      placeholder="Client ID"
+                      title="Unique Client ID (auto-generated)"
                     />
                   </div>
                   <div className="text-sm text-gray-600 flex items-end">
-                    P.ID is immutable after creation.
+                    Client ID is immutable after creation.
                   </div>
                 </div>
               )}
@@ -861,7 +867,9 @@ export default function CreateCase() {
             {/* Legacy Text Therapies (optional tags) */}
             <section className="space-y-4">
               <h2 className="text-xl font-semibold text-gray-800">🏷️ Therapy Tags (optional)</h2>
-              <p className="text-sm text-gray-600">Optional free-text tags you used earlier. Safe to ignore now.</p>
+              <p className="text-sm text-gray-600">
+                Optional free-text tags you used earlier. Safe to ignore now.
+              </p>
               <input
                 id={idFromKey("therapies")}
                 type="text"
@@ -1133,9 +1141,9 @@ export default function CreateCase() {
                                 <div className="text-sm text-gray-500">
                                   {isCatLoading
                                     ? "Loading tests…"
-                                    : (cat.tests?.length
-                                        ? "No tests match your search."
-                                        : "No tests configured for this therapy.")}
+                                    : cat.tests?.length
+                                    ? "No tests match your search."
+                                    : "No tests configured for this therapy."}
                                 </div>
                               )}
                             </div>
