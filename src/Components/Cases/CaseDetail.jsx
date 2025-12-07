@@ -2,6 +2,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
+import { ShieldAlert } from "lucide-react";
+import { toast } from "react-hot-toast";
 
 const CaseDetail = () => {
   const { caseId } = useParams();
@@ -9,7 +11,7 @@ const CaseDetail = () => {
 
   const [caseData, setCaseData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [errorMsg, setErrorMsg] = useState("");
+  const [errorState, setErrorState] = useState(null);
 
   // ---- bill state (single bill per case) ----
   const [bill, setBill] = useState(null);
@@ -27,17 +29,35 @@ const CaseDetail = () => {
 
   const fetchCaseDetail = async () => {
     setLoading(true);
-    setErrorMsg("");
+    setErrorState(null);
     try {
+      // 🔁 controller: GET /api/branch/cases/:id
       const res = await api.get(`/view-case/${caseId}`);
       setCaseData(res.data || null);
     } catch (error) {
       console.error("Error fetching case details:", error);
-      const message =
-        error?.response?.data?.message ||
+      const status = error?.response?.status;
+      const apiMsg =
         error?.response?.data?.error ||
-        "Unable to fetch case details. Please try again.";
-      setErrorMsg(message);
+        error?.response?.data?.message ||
+        "Unable to fetch case details.";
+
+      const friendly =
+        status === 403
+          ? "You don’t have permission to view this case. Please contact your administrator."
+          : status === 404
+          ? "This case could not be found. It may have been deleted or you may not have access."
+          : "Something went wrong while loading this case.";
+
+      setErrorState({
+        status: status || "NETWORK",
+        message: apiMsg,
+        friendly,
+      });
+
+      toast.error(apiMsg, {
+        id: "case-detail-error",
+      });
     } finally {
       setLoading(false);
     }
@@ -54,11 +74,12 @@ const CaseDetail = () => {
         setBill(null); // no bill yet for this case
       } else {
         console.error("Error fetching bill:", error);
-        setBillError(
+        const msg =
           error?.response?.data?.message ||
-            error?.response?.data?.error ||
-            "Unable to fetch bill."
-        );
+          error?.response?.data?.error ||
+          "Unable to fetch bill.";
+        setBillError(msg);
+        toast.error(msg, { id: "bill-error" });
       }
     } finally {
       setBillLoading(false);
@@ -71,7 +92,7 @@ const CaseDetail = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId]);
 
-  // Navigate to bill editor — your existing page (PUT /cases/:caseId/bill)
+  // Navigate to bill editor — existing page (PUT /cases/:caseId/bill)
   const handleGenerateOrEditBill = () => {
     navigate(`/admin/generate-bill`, { state: { caseData, existingBill: bill } });
   };
@@ -111,7 +132,10 @@ const CaseDetail = () => {
   const fmtMins = (n) => (Number.isFinite(Number(n)) ? `${Number(n)} min` : "—");
 
   const inr = (n) =>
-    new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(Number(n || 0));
+    new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
+    }).format(Number(n || 0));
 
   const Chip = ({ children, variant = "gray" }) => {
     const map = {
@@ -137,8 +161,10 @@ const CaseDetail = () => {
   const copyText = async (t) => {
     try {
       await navigator.clipboard.writeText(String(t || ""));
+      toast.success("Copied to clipboard");
     } catch (e) {
       console.warn("Clipboard not available:", e);
+      toast.error("Unable to copy");
     }
   };
 
@@ -165,14 +191,14 @@ const CaseDetail = () => {
       });
       if (data?.billing) setBill(data.billing);
       await refreshAfterPayment();
-      alert("Payment recorded successfully.");
+      toast.success("Payment recorded successfully.");
     } catch (error) {
       console.error("Offline payment error:", error);
-      alert(
+      const msg =
         error?.response?.data?.error ||
-          error?.response?.data?.message ||
-          "Failed to record payment."
-      );
+        error?.response?.data?.message ||
+        "Failed to record payment.";
+      toast.error(msg);
     }
   };
 
@@ -229,14 +255,14 @@ const CaseDetail = () => {
               notes: "Online payment via CaseDetail",
             });
             await refreshAfterPayment();
-            alert("Payment successful!");
+            toast.success("Payment successful!");
           } catch (err) {
             console.error("Verify error:", err);
-            alert(
+            const msg =
               err?.response?.data?.error ||
-                err?.response?.data?.message ||
-                "Payment verification failed."
-            );
+              err?.response?.data?.message ||
+              "Payment verification failed.";
+            toast.error(msg);
           }
         },
         modal: { ondismiss: () => {} },
@@ -246,24 +272,85 @@ const CaseDetail = () => {
       rzp.open();
     } catch (error) {
       console.error("Online payment error:", error);
-      alert(
+      const msg =
         error?.response?.data?.error ||
-          error?.response?.data?.message ||
-          error?.message ||
-          "Failed to start online payment."
-      );
+        error?.response?.data?.message ||
+        error?.message ||
+        "Failed to start online payment.";
+      toast.error(msg);
     }
   };
 
   // ---- early exits (NO HOOKS AFTER THIS LINE) ----
-  if (loading) return <div className="p-6">Loading case details...</div>;
-  if (errorMsg) return <div className="p-6 text-red-500 font-medium">Error: {errorMsg}</div>;
-  if (!caseData) return <div className="p-6 text-red-500">Case not found.</div>;
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="bg-white shadow-md rounded-xl px-6 py-4 text-sm text-gray-700">
+          Loading case details...
+        </div>
+      </div>
+    );
+  }
+
+  if (errorState) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
+        <div className="max-w-md w-full bg-white border border-red-100 shadow-2xl rounded-2xl p-6 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-1">
+              <ShieldAlert className="w-9 h-9 text-red-500" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-red-600">
+                {errorState.friendly}
+              </p>
+              <p className="text-xs text-gray-600">
+                <span className="font-medium text-gray-700">Server says:</span>{" "}
+                {errorState.message}
+              </p>
+              <p className="text-[11px] uppercase tracking-wide text-gray-400">
+                HTTP Status:{" "}
+                <span className="font-semibold">{errorState.status}</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              onClick={() => navigate(-1)}
+              className="px-4 py-2 rounded-lg border border-gray-200 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              ← Go Back
+            </button>
+            <button
+              onClick={() => {
+                setErrorState(null);
+                fetchCaseDetail();
+              }}
+              className="px-4 py-2 rounded-lg bg-red-600 text-xs font-semibold text-white hover:bg-red-700 shadow-sm"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!caseData) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="bg-white shadow-md rounded-xl px-6 py-4 text-sm text-red-600">
+          Case not found.
+        </div>
+      </div>
+    );
+  }
 
   // Safe destructure after guards
   const {
     _id,
-    adminId,
+    branchId,
     created_by,
     assigned_to,
     p_id,
@@ -329,7 +416,9 @@ const CaseDetail = () => {
         {/* Header */}
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-8">
           <div className="space-y-2">
-            <h2 className="text-3xl md:text-4xl font-extrabold text-indigo-800">📝 Case Details</h2>
+            <h2 className="text-3xl md:text-4xl font-extrabold text-indigo-800">
+              📝 Case Details
+            </h2>
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex items-center gap-2">
                 <Label>P.ID</Label>
@@ -386,8 +475,8 @@ const CaseDetail = () => {
         {/* Meta / Ownership */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8 text-sm">
           <div className="bg-indigo-50 p-3 rounded">
-            <Label>Admin</Label>
-            <p className="mt-1 break-all">{adminId || "—"}</p>
+            <Label>Branch</Label>
+            <p className="mt-1 break-all">{branchId || "—"}</p>
           </div>
           <div className="bg-indigo-50 p-3 rounded">
             <Label>Created By</Label>
@@ -469,9 +558,12 @@ const CaseDetail = () => {
                 {[address.line1, address.line2].filter(Boolean).join(", ") || "—"}
               </p>
               <p className="text-gray-600">
-                {[address.city, address.state, address.country].filter(Boolean).join(", ") || ""}
+                {[address.city, address.state, address.country].filter(Boolean).join(", ") ||
+                  ""}
               </p>
-              {address.pincode ? <p className="text-gray-600">Pincode: {address.pincode}</p> : null}
+              {address.pincode ? (
+                <p className="text-gray-600">Pincode: {address.pincode}</p>
+              ) : null}
             </div>
           </div>
 
@@ -496,15 +588,19 @@ const CaseDetail = () => {
           <div className="bg-blue-50 p-4 rounded-md shadow-sm">
             <Label>Referral</Label>
             <p className="font-medium text-base mt-1">
-              {(referral_type || referral_name)
-                ? `${referral_type || "—"} ${referral_name ? `· ${referral_name}` : ""}`
+              {referral_type || referral_name
+                ? `${referral_type || "—"} ${
+                    referral_name ? `· ${referral_name}` : ""
+                  }`
                 : "—"}
             </p>
           </div>
 
           {/* Therapies & Conditions (legacy tags) */}
           <div className="bg-purple-100 p-4 rounded-md shadow-sm">
-            <p className="text-sm text-gray-500 mb-1 font-semibold">🩺 Therapy Tags (legacy)</p>
+            <p className="text-sm text-gray-500 mb-1 font-semibold">
+              🩺 Therapy Tags (legacy)
+            </p>
             <div className="flex flex-wrap gap-2">
               {(therapies || []).length ? (
                 therapies.map((t, i) => (
@@ -587,7 +683,9 @@ const CaseDetail = () => {
 
         {/* ===================== THERAPY PLAN SNAPSHOT ===================== */}
         <div className="mt-8">
-          <h3 className="text-2xl font-bold text-indigo-800 mb-3">🩺 Therapy Plan Snapshot</h3>
+          <h3 className="text-2xl font-bold text-indigo-800 mb-3">
+            🩺 Therapy Plan Snapshot
+          </h3>
 
           {!therapy_plan?.length ? (
             <div className="text-sm text-gray-600">No therapy plan added.</div>
@@ -647,13 +745,24 @@ const CaseDetail = () => {
                           <tbody>
                             {subList.length ? (
                               subList.map((s, i2) => (
-                                <tr key={`${s?.subTherapyId || i2}`} className="border-b last:border-b-0">
+                                <tr
+                                  key={`${s?.subTherapyId || i2}`}
+                                  className="border-b last:border-b-0"
+                                >
                                   <td className="py-2 pr-4">{s?.name || "—"}</td>
-                                  <td className="py-2 pr-4">{fmtMins(s?.duration_mins)}</td>
-                                  <td className="py-2 pr-4">{inr(s?.price_per_session)}</td>
-                                  <td className="py-2 pr-4">{inr(s?.price_per_package)}</td>
                                   <td className="py-2 pr-4">
-                                    {Number.isFinite(Number(s?.default_sessions_per_package))
+                                    {fmtMins(s?.duration_mins)}
+                                  </td>
+                                  <td className="py-2 pr-4">
+                                    {inr(s?.price_per_session)}
+                                  </td>
+                                  <td className="py-2 pr-4">
+                                    {inr(s?.price_per_package)}
+                                  </td>
+                                  <td className="py-2 pr-4">
+                                    {Number.isFinite(
+                                      Number(s?.default_sessions_per_package)
+                                    )
                                       ? Number(s?.default_sessions_per_package)
                                       : "—"}
                                   </td>
@@ -671,8 +780,12 @@ const CaseDetail = () => {
                                       <Chip>No</Chip>
                                     )}
                                   </td>
-                                  <td className="py-2 pr-4">{formatDateTime(s?.createdAt)}</td>
-                                  <td className="py-2 pr-4">{formatDateTime(s?.updatedAt)}</td>
+                                  <td className="py-2 pr-4">
+                                    {formatDateTime(s?.createdAt)}
+                                  </td>
+                                  <td className="py-2 pr-4">
+                                    {formatDateTime(s?.updatedAt)}
+                                  </td>
                                 </tr>
                               ))
                             ) : (
@@ -711,12 +824,23 @@ const CaseDetail = () => {
                             <tbody>
                               {testsList.length ? (
                                 testsList.map((t, i3) => (
-                                  <tr key={`${t?.testId || i3}`} className="border-b last:border-b-0">
+                                  <tr
+                                    key={`${t?.testId || i3}`}
+                                    className="border-b last:border-b-0"
+                                  >
                                     <td className="py-2 pr-4">{t?.name || "—"}</td>
-                                    <td className="py-2 pr-4">{fmtMins(t?.duration_mins)}</td>
-                                    <td className="py-2 pr-4">{inr(t?.price_per_test)}</td>
-                                    <td className="py-2 pr-4">{formatDateTime(t?.createdAt)}</td>
-                                    <td className="py-2 pr-4">{formatDateTime(t?.updatedAt)}</td>
+                                    <td className="py-2 pr-4">
+                                      {fmtMins(t?.duration_mins)}
+                                    </td>
+                                    <td className="py-2 pr-4">
+                                      {inr(t?.price_per_test)}
+                                    </td>
+                                    <td className="py-2 pr-4">
+                                      {formatDateTime(t?.createdAt)}
+                                    </td>
+                                    <td className="py-2 pr-4">
+                                      {formatDateTime(t?.updatedAt)}
+                                    </td>
                                   </tr>
                                 ))
                               ) : (
@@ -730,7 +854,9 @@ const CaseDetail = () => {
                           </table>
                         </div>
                       ) : (
-                        <div className="text-sm text-gray-500 mt-1">Tests not enabled for this therapy.</div>
+                        <div className="text-sm text-gray-500 mt-1">
+                          Tests not enabled for this therapy.
+                        </div>
                       )}
                     </div>
                   </div>
@@ -747,11 +873,15 @@ const CaseDetail = () => {
           {billLoading ? (
             <div className="text-gray-600">Loading bill...</div>
           ) : billError ? (
-            <div className="text-red-600">{billError}</div>
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+              <span className="font-semibold">Bill Error: </span>
+              {billError}
+            </div>
           ) : !bill ? (
             <div className="bg-white border border-dashed border-indigo-200 rounded-lg p-6 text-sm">
               <p className="text-gray-700 mb-3">
-                No bill exists for this case yet. Create one to start recording payments.
+                No bill exists for this case yet. Create one to start recording
+                payments.
               </p>
               <button
                 onClick={handleGenerateOrEditBill}
@@ -793,7 +923,9 @@ const CaseDetail = () => {
                 </div>
                 <div className="bg-indigo-50 p-3 rounded">
                   <Label>Paid</Label>
-                  <div className="font-semibold mt-1">{inr(bill.paid_amount || 0)}</div>
+                  <div className="font-semibold mt-1">
+                    {inr(bill.paid_amount || 0)}
+                  </div>
                 </div>
                 <div className="bg-indigo-50 p-3 rounded md:col-span-3">
                   <Label>Remaining</Label>
@@ -845,7 +977,9 @@ const CaseDetail = () => {
                       ? "bg-gray-300 text-gray-600 cursor-not-allowed"
                       : "bg-amber-600 hover:bg-amber-700 text-white"
                   }`}
-                  title={remaining <= 0 ? "Bill is fully paid" : "Record an offline payment"}
+                  title={
+                    remaining <= 0 ? "Bill is fully paid" : "Record an offline payment"
+                  }
                 >
                   💵 Record Offline Payment
                 </button>
@@ -858,7 +992,9 @@ const CaseDetail = () => {
                       ? "bg-gray-300 text-gray-600 cursor-not-allowed"
                       : "bg-emerald-600 hover:bg-emerald-700 text-white"
                   }`}
-                  title={remaining <= 0 ? "Bill is fully paid" : "Collect payment online"}
+                  title={
+                    remaining <= 0 ? "Bill is fully paid" : "Collect payment online"
+                  }
                 >
                   🧾 Pay Online (Razorpay)
                 </button>

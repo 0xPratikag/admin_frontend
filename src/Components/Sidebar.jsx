@@ -1,4 +1,3 @@
-// Sidebar.jsx
 import React, { useState, useEffect } from "react";
 import {
   LayoutDashboard,
@@ -20,6 +19,85 @@ import {
 import { useNavigate, useLocation } from "react-router-dom";
 import { useSelector } from "react-redux";
 
+/**
+ * Same mapping: permission CODES → internal access keys
+ * Keep this in sync with DashboardRouting.
+ */
+const PERM_KEY_MAP = {
+  // ===== Dashboard =====
+  DASHBOARD_VIEW: "dashboard",
+
+  // ===== Catalog / Therapy Catalog =====
+  CATALOG: "catalog",
+  CREATE_CATALOG_THERAPY: "therapy_catalog",
+  VIEW_CATALOG_THERAPY: "therapy_catalog",
+  GET_CATALOG_THERAPY_BY_ID: "therapy_catalog",
+  UPDATE_CATALOG_THERAPY: "therapy_catalog",
+  DELETE_CATALOG_THERAPY: "therapy_catalog",
+  TOGGLE_CATALOG_THERAPY: "therapy_catalog",
+
+
+  // ******** assignment_manager ****
+
+    assignment_manager: "assignment_manager",
+  assignment_manager_List: "assignment_manager_List",
+
+  // ===== Cases =====
+  CASES: "cases",
+  CASES_CREATE: "create_case",
+  CREATE_CASE: "create_case",
+  VERIFY_PID: "create_case",
+  "UPDATE-CASE": "create_case",
+  CASES_VIEW: "view_case",
+  GET_CASE_BY_ID: "view_case",
+  SEARCH_CASE: "view_case",
+  GET_CASES: "view_case",
+  DELETE_CASE: "view_case",
+
+  // ===== Billing (menu + granular) =====
+  BILLING: "billing",
+  BILLING_VIEW: "view_bill",
+  BILL_CASE_GET: "generate_bill",
+  BILL_CASE_UPSERT: "generate_bill",
+  BILL_LIST: "view_bill",
+  BILL_VIEW: "view_bill",
+  BILL_CREATE_LEGACY: "generate_bill",
+
+  // ===== Payments (old module) =====
+  PAYMENT: "payment",
+  PAYMENT_ONLINE: "online_payment",
+  PAYMENT_OFFLINE: "offline_payment",
+  PAYMENT_TRANSACTIONS: "transactions",
+
+  // ===== Payments (new billing-specific) =====
+  BILL_PAYMENT_OFFLINE: "offline_payment",
+  BILL_PAYMENT_ONLINE_INITIATE: "online_payment",
+  BILL_PAYMENT_ONLINE_VERIFY: "online_payment",
+
+  // ===== Transactions =====
+  TXN_LIST: "transactions",
+  TXN_VIEW: "transactions",
+
+  // ===== Invoices =====
+  BILL_INVOICE_BY_TRANSACTION: "transactions",
+  BILL_INVOICE_BY_CASE: "view_bill",
+  BILL_FINAL_INVOICE_BY_BILL: "view_bill",
+
+  // ===== Members =====
+  MEMBERS: "members",
+  MEMBERS_INVITE: "add_members",
+
+  // ===== Schedule =====
+  SCHEDULE: "schedule",
+  SCHEDULE_MEETING: "schedule_online",
+  SCHEDULED_SESSION: "schedule_sessions",
+  SCHEDULED_ALL: "all_scheduled",
+
+  // ===== Settings / Logout =====
+  SETTINGS: "settings",
+  SETTINGS_LOGOUT: "logout",
+};
+
 const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -29,53 +107,49 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
   const [loading, setLoading] = useState(false);
   const [activeHover, setActiveHover] = useState(null);
 
-  const { role, subrole, modules: accessModules = [] } = useSelector(
+  const { role, type, modules: modulesObj = {} } = useSelector(
     (state) => state.modules || {}
   );
 
-  // Map API names -> internal keys
-  const MODULE_KEY_MAP = {
-    Dashboard: "dashboard",
+  // 🔹 Branch name localStorage se le lo (branch dashboard ke liye)
+  useEffect(() => {
+    try {
+      const userRaw = localStorage.getItem("user");
+      if (userRaw) {
+        const user = JSON.parse(userRaw);
+        if (user?.branchName) setBranchName(user.branchName);
+        else if (user?.name) setBranchName(user.name);
+      }
+    } catch (e) {}
+  }, []);
 
-      Catalog: "catalog",
-  "Therapy Catalog": "therapy_catalog",
-
-
-
-    Cases: "cases",
-    "Create Case": "create_case",
-    "View Case": "view_case",
-
-   // 🔹 Assignments related (dono same key pe)
-  Assignments: "assignment_manager",
-  "Manage Assignments": "assignment_manager",
-    "Assignments List": "assignment_manager_List",
-
-    
-    Billing: "billing",
-    "View Bill": "view_bill",
-    Payment: "payment",
-    Online: "online_payment",
-    Offline: "offline_payment",
-    Transactions: "transactions",
-    Members: "members",
-    "Invite Member": "add_members",
-    Schedule: "schedule",
-    "Session": "schedule_sessions",
-
-    "Schedule Meeting": "schedule_online",
-    "All Scheduled": "all_scheduled",
-    Logout: "logout",
-
-    
-  };
-
-  // Normalize access coming from API (Title Case) to internal keys (snake_case)
-  const normalizedAccess = accessModules.map(
-    (m) => MODULE_KEY_MAP[m] || m.toLowerCase().replace(/\s+/g, "_")
+  // 🔥 modules object → flat permissions list
+  const flatPermissions = Object.values(modulesObj || {}).reduce(
+    (acc, arr) => acc.concat(arr || []),
+    []
   );
 
-  // Single source of truth for sidebar structure (internal keys)
+  // codes → internal keys (with fallback on name slug)
+  const normalizedAccess = Array.from(
+    new Set(
+      flatPermissions.flatMap((perm) => {
+        const code = perm?.code || "";
+        const name = perm?.name || "";
+
+        if (code && PERM_KEY_MAP[code]) {
+          return [PERM_KEY_MAP[code]];
+        }
+
+        if (name) {
+          return [name.toLowerCase().replace(/\s+/g, "_")];
+        }
+
+        return [];
+      })
+    )
+  );
+
+  // Single source of truth for sidebar structure
   const allModules = [
     {
       key: "dashboard",
@@ -85,21 +159,19 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
     },
 
     {
-  key: "catalog",
-  name: "Catalog",
-  path: "/admin/",
-  icon: <Stethoscope className="w-5 h-5" />,
-  children: [
-    {
-      key: "therapy_catalog",
-      name: "Therapy Catalog",
-      path: "/admin/therapy-catalog",
-      icon: <Stethoscope className="w-4 h-4" />,
+      key: "catalog",
+      name: "Catalog",
+      path: "/admin/",
+      icon: <Stethoscope className="w-5 h-5" />,
+      children: [
+        {
+          key: "therapy_catalog",
+          name: "Therapy Catalog",
+          path: "/admin/therapy-catalog",
+          icon: <Stethoscope className="w-4 h-4" />,
+        },
+      ],
     },
-  ],
-},
-
-
 
     {
       key: "cases",
@@ -122,8 +194,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
       ],
     },
 
-
-       {
+    {
       key: "assignments",
       name: "Assignments",
       path: "/admin/",
@@ -135,40 +206,35 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
           path: "/admin/assignments",
           icon: <ClipboardList className="w-4 h-4" />,
         },
-
-          {
+        {
           key: "assignment_manager_List",
           name: "Assignments List",
           path: "/admin/assignment_manager_List",
           icon: <ClipboardList className="w-4 h-4" />,
         },
-
-
       ],
     },
 
-
-    
-  {
-  key: "billing",
-  name: "Billing",
-  path: "/admin/",
-  icon: <ReceiptText className="w-5 h-5" />,
-  children: [
     {
-      key: "generate_bill",
-      name: "Generate Bill",
-      path: "/admin/generate-bill",
-      icon: <FilePlus className="w-4 h-4" />,
+      key: "billing",
+      name: "Billing",
+      path: "/admin/",
+      icon: <ReceiptText className="w-5 h-5" />,
+      children: [
+        {
+          key: "generate_bill",
+          name: "Generate Bill",
+          path: "/admin/generate-bill",
+          icon: <FilePlus className="w-4 h-4" />,
+        },
+        {
+          key: "view_bill",
+          name: "View Bill",
+          path: "/admin/view-bill",
+          icon: <CreditCard className="w-4 h-4" />,
+        },
+      ],
     },
-    {
-      key: "view_bill",
-      name: "View Bill",
-      path: "/admin/view-bill",
-      icon: <CreditCard className="w-4 h-4" />,
-    },
-  ],
-},
 
     {
       key: "payment",
@@ -176,12 +242,12 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
       path: "/admin/",
       icon: <Banknote className="w-5 h-5" />,
       children: [
-        {
-          key: "online_payment",
-          name: "Online",
-          path: "/admin/onlinepayment",
-          icon: <CreditCard className="w-4 h-4" />,
-        },
+        // {
+        //   key: "online_payment",
+        //   name: "Online",
+        //   path: "/admin/onlinepayment",
+        //   icon: <CreditCard className="w-4 h-4" />,
+        // },
         {
           key: "offline_payment",
           name: "Offline",
@@ -196,51 +262,51 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
         },
       ],
     },
-    {
-      key: "members",
-      name: "Members",
-      path: "/admin/",
-      icon: <Users className="w-5 h-5" />,
-      children: [
-        {
-          key: "add_members",
-          name: "Invite Member",
-          path: "/admin/Invite",
-          icon: <Users className="w-4 h-4" />,
-        },
-      ],
-    },
-    {
-      key: "schedule",
-      name: "Schedule",
-      path: "/admin/",
-      icon: <Calendar className="w-5 h-5" />,
-      children: [
 
-         {
-          key: "schedule_sessions",
-          name: "Session",
-          path: "/admin/scheduledSessions",
-          icon: <Calendar className="w-4 h-4" />,
-        },
+    // {
+    //   key: "members",
+    //   name: "Members",
+    //   path: "/admin/",
+    //   icon: <Users className="w-5 h-5" />,
+    //   children: [
+    //     {
+    //       key: "add_members",
+    //       name: "Invite Member",
+    //       path: "/admin/Invite",
+    //       icon: <Users className="w-4 h-4" />,
+    //     },
+    //   ],
+    // },
 
-        {
-          key: "schedule_online",
-          name: "Schedule Meeting",
-          path: "/admin/meetingManager",
-          icon: <Calendar className="w-4 h-4" />,
-        },
-        {
-          key: "all_scheduled",
-          name: "All Scheduled",
-          path: "/admin/all-scheduledList",
-          icon: <ClipboardList className="w-4 h-4" />,
-        },
-      ],
-    },
+    // {
+    //   key: "schedule",
+    //   name: "Schedule",
+    //   path: "/admin/",
+    //   icon: <Calendar className="w-5 h-5" />,
+    //   children: [
+    //     {
+    //       key: "schedule_sessions",
+    //       name: "Session",
+    //       path: "/admin/scheduledSessions",
+    //       icon: <Calendar className="w-4 h-4" />,
+    //     },
+    //     {
+    //       key: "schedule_online",
+    //       name: "Schedule Meeting",
+    //       path: "/admin/meetingManager",
+    //       icon: <Calendar className="w-4 h-4" />,
+    //     },
+    //     {
+    //       key: "all_scheduled",
+    //       name: "All Scheduled",
+    //       path: "/admin/all-scheduledList",
+    //       icon: <ClipboardList className="w-4 h-4" />,
+    //     },
+    //   ],
+    // },
   ];
 
-  // Include a parent if the parent OR any of its children are allowed
+  // Parent visible if parent OR any child is allowed
   const filteredModules = allModules
     .map((mod) => {
       const parentAllowed = normalizedAccess.includes(mod.key);
@@ -255,9 +321,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
     })
     .filter(Boolean);
 
-
-    
-
   useEffect(() => {
     setTimeout(() => setLoading(false), 500);
   }, []);
@@ -271,17 +334,13 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
   const isActive = (path) =>
     currentPath === path || currentPath.startsWith(path + "/");
 
-  const handleNavigate = (path) => {
-    navigate(path);
-  };
-
+  const handleNavigate = (path) => navigate(path);
   const toggleCollapse = () => setIsCollapsed((s) => !s);
 
   const canLogout = normalizedAccess.includes("logout");
 
   return (
     <>
-      {/* Mobile Overlay */}
       {!isCollapsed && (
         <div
           className="fixed inset-0 bg-black/30 z-40 lg:hidden"
@@ -295,7 +354,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
           bg-white border-r border-gray-200 shadow-lg`}
       >
         <div className="relative h-full overflow-hidden">
-          {/* Toggle Button */}
+          {/* Toggle */}
           <button
             onClick={toggleCollapse}
             className="absolute top-4 right-4 z-10 p-1.5 rounded-md
@@ -311,7 +370,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
             scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent
             ${isCollapsed ? "px-2" : "px-4"}`}
           >
-            {/* Branch Header */}
+            {/* Header */}
             <div
               className={`mb-8 text-center transition-all duration-300 ${
                 isCollapsed ? "mb-6" : "mb-8"
@@ -338,7 +397,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
                   {!isCollapsed && (
                     <div className="mt-2 px-3 py-1 bg-blue-50 rounded-full border border-blue-100">
                       <p className="text-xs text-blue-700 font-medium">
-                        {subrole || role}
+                        {type || role}
                       </p>
                     </div>
                   )}
@@ -359,7 +418,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
                     onMouseEnter={() => setActiveHover(mod.name)}
                     onMouseLeave={() => setActiveHover(null)}
                   >
-                    {/* Parent Menu */}
                     <button
                       onClick={() =>
                         mod.children?.length
@@ -403,7 +461,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
                       )}
                     </button>
 
-                    {/* Tooltip for collapsed state */}
+                    {/* Tooltip collapsed */}
                     {isCollapsed && isHovered && (
                       <div
                         className="absolute left-16 bg-gray-900 text-white px-2 py-1 rounded-md 
@@ -418,7 +476,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
                       </div>
                     )}
 
-                    {/* Submenu */}
+                    {/* Children */}
                     {mod.children?.length && !isCollapsed && (
                       <div
                         className={`ml-8 mt-1 space-y-1 overflow-hidden 
@@ -461,11 +519,14 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
               })}
             </nav>
 
-            {/* Logout Button (only if allowed) */}
+            {/* Logout */}
             {canLogout && (
               <div className={`mt-auto ${isCollapsed ? "px-2" : "px-4"} mb-4`}>
                 <button
-                  onClick={() => navigate("/authentication")}
+                  onClick={() => {
+                    localStorage.clear();
+                    navigate("/authentication");
+                  }}
                   className={`flex items-center gap-3 w-full rounded-lg
                   p-2.5 text-left group transition-all duration-200
                   hover:bg-red-50 hover:text-red-700 text-gray-700`}

@@ -1,21 +1,16 @@
 // src/utils/authService.js
-import axios from 'axios';
+import axios from "axios";
 
-// const API_URL = "http://localhost:3000/api";
 const API_URL = import.meta.env.VITE_API_URL;
 
-
-export const loginUser = async (email, password, role, subrole, tempPass) => {
+export const loginUser = async (email, password) => {
   try {
-    const response = await axios.post(`${API_URL}/login`, {
+    const response = await axios.post(`${API_URL}/branch-login`, {
       email,
-      password,
-      role,
-      subrole,
-      tempPass, // ✅ also send tempPass
+      password, // ✅ sirf ye 2 fields jaa rahe hain
     });
     return response.data;
   } catch (error) {
-    throw new Error(error.response?.data?.message || 'Login failed');
+    throw new Error(error.response?.data?.message || "Login failed");
   }
 };

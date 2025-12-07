@@ -1,6 +1,5 @@
-// DashboardRouting.jsx
 import React, { useState } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { useSelector } from "react-redux";
 
 import DashboardBase from "./DashboardBase";
@@ -29,129 +28,250 @@ const Forbidden = () => (
   </div>
 );
 
-// 🔑 map API module names → internal keys
-const moduleKeyMap = {
-  Dashboard: "dashboard",
+/**
+ * Map backend permission CODES → internal access keys
+ * These keys are used by routes + sidebar.
+ */
+const PERM_KEY_MAP = {
+  // ===== Dashboard =====
+  DASHBOARD_VIEW: "dashboard",
 
-    Catalog: "catalog",
-  "Therapy Catalog": "therapy_catalog",
+  // ===== Catalog / Therapy Catalog =====
+  CATALOG: "catalog",
+  CREATE_CATALOG_THERAPY: "therapy_catalog",
+  VIEW_CATALOG_THERAPY: "therapy_catalog",
+  GET_CATALOG_THERAPY_BY_ID: "therapy_catalog",
+  UPDATE_CATALOG_THERAPY: "therapy_catalog",
+  DELETE_CATALOG_THERAPY: "therapy_catalog",
+  TOGGLE_CATALOG_THERAPY: "therapy_catalog",
 
+  // ===== Cases =====
+  CASES: "cases",
+  CASES_CREATE: "create_case",
+  CREATE_CASE: "create_case",
+  VERIFY_PID: "create_case",
+  "UPDATE-CASE": "create_case",
+  CASES_VIEW: "view_case",
+  GET_CASE_BY_ID: "view_case",
+  SEARCH_CASE: "view_case",
+  GET_CASES: "view_case",
+  DELETE_CASE: "view_case",
 
-  Cases: "cases",
-  "Create Case": "create_case",
-  "View Case": "view_case",
+  // ===== Billing (menu + granular) =====
+  BILLING: "billing",
+  BILLING_VIEW: "view_bill",
+  BILL_CASE_GET: "generate_bill",
+  BILL_CASE_UPSERT: "generate_bill",
+  BILL_LIST: "view_bill",
+  BILL_VIEW: "view_bill",
+  BILL_CREATE_LEGACY: "generate_bill",
 
-  // 🔹 Assignments related (dono same key pe)
-  Assignments: "assignment_manager",
-  "Manage Assignments": "assignment_manager",
-  "Assignments List": "assignment_manager_List",
+  // ===== Payments (old module) =====
+  PAYMENT: "payment",
+  PAYMENT_ONLINE: "online_payment",
+  PAYMENT_OFFLINE: "offline_payment",
+  PAYMENT_TRANSACTIONS: "transactions",
 
-  Billing: "billing",
-  "View Bill": "view_bill",
-  Payment: "payment",
-  Online: "online_payment",
-  Offline: "offline_payment",
-  Transactions: "transactions",
-  Members: "members",
-  "Invite Member": "add_members",
-  Schedule: "schedule",
-      "Session": "schedule_sessions",
-  "Schedule Meeting": "schedule_online",
-  "All Scheduled": "all_scheduled",
-  Logout: "logout",
+  // ===== Payments (new billing-specific) =====
+  BILL_PAYMENT_OFFLINE: "offline_payment",
+  BILL_PAYMENT_ONLINE_INITIATE: "online_payment",
+  BILL_PAYMENT_ONLINE_VERIFY: "online_payment",
 
+  // ===== Transactions =====
+  TXN_LIST: "transactions",
+  TXN_VIEW: "transactions",
 
+  // ===== Invoices =====
+  BILL_INVOICE_BY_TRANSACTION: "transactions",
+  BILL_INVOICE_BY_CASE: "view_bill",
+  BILL_FINAL_INVOICE_BY_BILL: "view_bill",
+
+  // ===== Members =====
+  MEMBERS: "members",
+  MEMBERS_INVITE: "add_members",
+
+     assignment_manager: "assignment_manager",
+  assignment_manager_List: "assignment_manager_List",
+
+  // ===== Schedule =====
+  SCHEDULE: "schedule",
+  SCHEDULE_MEETING: "schedule_online",
+  SCHEDULED_SESSION: "schedule_sessions",
+  SCHEDULED_ALL: "all_scheduled",
+
+  // ===== Settings / Logout =====
+  SETTINGS: "settings",
+  SETTINGS_LOGOUT: "logout",
 };
 
 const DashboardRouting = () => {
-  const { modules: access, loading } = useSelector((s) => s.modules || {});
+  const location = useLocation();
+  const { modules: access = {}, loading } = useSelector((s) => s.modules || {});
   const [isCollapsed, setIsCollapsed] = useState(false);
 
-  // normalize module names
-  const normalizedAccess = (access || []).map(
-    (m) => moduleKeyMap[m] || m.toLowerCase().replace(/\s+/g, "_")
+  // 🔥 flatten permissions from modules object
+  const flatPermissions = Object.values(access || {}).reduce(
+    (acc, arr) => acc.concat(arr || []),
+    []
   );
 
-  // Map each route to its required module key
+  // codes → internal keys (with fallback on name slug)
+  const normalizedAccess = Array.from(
+    new Set(
+      flatPermissions.flatMap((perm) => {
+        const code = perm?.code || "";
+        const name = perm?.name || "";
+
+        if (code && PERM_KEY_MAP[code]) {
+          return [PERM_KEY_MAP[code]];
+        }
+
+        if (name) {
+          return [name.toLowerCase().replace(/\s+/g, "_")];
+        }
+
+        return [];
+      })
+    )
+  );
+
   const ROUTES = [
     { path: "/admin/dashboard", element: <DashboardBase />, key: "dashboard" },
 
     // Cases
     { path: "/admin/create-cases", element: <CreateCase />, key: "create_case" },
     { path: "/admin/view-cases", element: <ViewAllCase />, key: "view_case" },
-    { path: "/admin/edit-case/:caseId", element: <CreateCase />, key: "create_case" },
-    { path: "/admin/case-details/:caseId", element: <CaseDetail />, key: "view_case" },
+    {
+      path: "/admin/edit-case/:caseId",
+      element: <CreateCase />,
+      key: "create_case",
+    },
+    {
+      path: "/admin/case-details/:caseId",
+      element: <CaseDetail />,
+      key: "view_case",
+    },
 
     // Billing
     { path: "/admin/view-bill", element: <ViewBill />, key: "view_bill" },
-    { path: "/admin/bill-details/:id", element: <ViewBillDetails />, key: "view_bill" },
-    {path: "/admin/generate-bill", element : <GenerateBill />, key: "generate_bill"},
+    {
+      path: "/admin/bill-details/:id",
+      element: <ViewBillDetails />,
+      key: "view_bill",
+    },
+    {
+      path: "/admin/generate-bill",
+      element: <GenerateBill />,
+      key: "generate_bill",
+    },
 
     // Payment
-    { path: "/admin/onlinepayment", element: <OnlinePayment />, key: "online_payment" },
-    { path: "/admin/offlinepayment", element: <OfflinePayment />, key: "offline_payment" },
+    {
+      path: "/admin/onlinepayment",
+      element: <OnlinePayment />,
+      key: "online_payment",
+    },
+    {
+      path: "/admin/offlinepayment",
+      element: <OfflinePayment />,
+      key: "offline_payment",
+    },
     { path: "/admin/txnList", element: <TransactionList />, key: "transactions" },
-    { path: "/admin/transaction-details/:id", element: <TransactionDetails />, key: "transactions" },
+    {
+      path: "/admin/transaction-details/:id",
+      element: <TransactionDetails />,
+      key: "transactions",
+    },
 
     // Members
     { path: "/admin/Invite", element: <InvitePage />, key: "add_members" },
 
     // Schedule
-    { path: "/admin/meetingManager", element: <MeetingManager />, key: "schedule_online" },
+    {
+      path: "/admin/meetingManager",
+      element: <MeetingManager />,
+      key: "schedule_online",
+    },
+    {
+      path: "/admin/scheduledSessions",
+      element: <ScheduledSession />,
+      key: "schedule_sessions",
+    },
 
-    { path: "/admin/scheduledSessions", element: <ScheduledSession />, key: "schedule_sessions" },
+    // Therapy Catalog
+    {
+      path: "/admin/therapy-catalog",
+      element: <TherapyCatalog />,
+      key: "therapy_catalog",
+    },
 
+    // Assignments
+    {
+      path: "/admin/assignments",
+      element: <AssignmentManager />,
+      key: "assignment_manager",
+    },
+    {
+      path: "/admin/assignment_manager_List",
+      element: <AssignmentList />,
+      key: "assignment_manager_List",
+    },
 
-    // ******** Theapy insertion ************
-{ path: "/admin/therapy-catalog", element: <TherapyCatalog />, key: "therapy_catalog" },
-
-
-    
- // 🔹 NEW: Assignment manager
-    { path: "/admin/assignments", element: <AssignmentManager />, key: "assignment_manager" },
-
-        { path: "/admin/assignment_manager_List", element: <AssignmentList />, key: "assignment_manager_List" },
-
-
-    // Public-ish admin page
+    // Fallback / 403
     { path: "/admin/403", element: <Forbidden />, key: null },
   ];
 
-  if (loading) {
+  // 🔑 Access ready kab hai?
+  const accessReady = !loading && normalizedAccess.length > 0;
+
+  // Agar abhi permissions nahi aaye → sirf layout + loader
+  if (!accessReady) {
     return (
       <div className="flex">
         <Sidebar isCollapsed={isCollapsed} setIsCollapsed={setIsCollapsed} />
-        <div className={`flex-1 transition-all duration-300 ${isCollapsed ? "lg:ml-16" : "lg:ml-64"} ml-0`}>
-          <div className="max-w-7xl mx-auto w-full p-6">Loading…</div>
+        <div
+          className={`flex-1 transition-all duration-300 ${
+            isCollapsed ? "lg:ml-16" : "lg:ml-64"
+          } ml-0`}
+        >
+          <div className="max-w-7xl mx-auto w-full p-6">
+            <p className="text-gray-600">Loading permissions…</p>
+          </div>
         </div>
       </div>
     );
   }
 
-  // First allowed route for default redirect
+  // Ab permissions ready hain → default allowed route nikaalo
   const firstAllowed =
     ROUTES.find((r) => r.key && normalizedAccess.includes(r.key))?.path ||
     "/admin/403";
 
+  // Agar koi permission hai aur current URL 403 hai,
+  // to user ko default allowed route pe bhej do:
+  if (location.pathname === "/admin/403" && firstAllowed !== "/admin/403") {
+    return <Navigate to={firstAllowed} replace />;
+  }
+
   return (
     <div className="flex">
       <Sidebar isCollapsed={isCollapsed} setIsCollapsed={setIsCollapsed} />
-      {/* On desktop, push content by sidebar width; on mobile keep full-width (overlay handles it) */}
       <div
         className={`flex-1 transition-all duration-300 ${
           isCollapsed ? "lg:ml-16" : "lg:ml-64"
         } ml-0`}
       >
-        {/* “Compressed” content width */}
         <div className="max-w-7xl mx-auto w-full p-6">
           <Routes>
             {ROUTES.map(({ path, element, key }) => {
               if (!key) return <Route key={path} path={path} element={element} />;
+
               return normalizedAccess.includes(key) ? (
                 <Route key={path} path={path} element={element} />
               ) : null;
             })}
-            {/* Fallbacks — send users to first allowed or 403 */}
+
+            {/* Fallback sirf tab jab access ready hai */}
             <Route path="*" element={<Navigate to={firstAllowed} replace />} />
           </Routes>
         </div>

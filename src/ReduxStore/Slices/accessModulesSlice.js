@@ -1,10 +1,9 @@
+// accessModulesSlice.js
 import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
 import axios from "axios";
 
-// ✅ Vite env
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
-// 🔹 Async thunk
 export const fetchAccessModules = createAsyncThunk(
   "modules/fetchAccessModules",
   async (_, { rejectWithValue }) => {
@@ -18,14 +17,29 @@ export const fetchAccessModules = createAsyncThunk(
       const res = await axios.get(`${API_BASE_URL}/modules/access`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      console.log(res);
-      
 
-      // API returns { role, subRole, modules }
-      return res.data;
+      return res.data; // { role, type, modules: { Dashboard: [...], ... } }
     } catch (err) {
+      const status = err?.response?.status;
+      const data = err?.response?.data;
+
+      const shouldLogout =
+        status === 440 ||
+        data?.action === "logout" ||
+        ["session_invalid", "permissions_changed", "role_revoked", "invalid_type"].includes(
+          data?.error
+        );
+
+      if (shouldLogout) {
+        localStorage.clear();
+        window.location.href = "/authentication";
+        return rejectWithValue(
+          data?.message || "Your session has expired. Please login again."
+        );
+      }
+
       return rejectWithValue(
-        err.response?.data?.error || "Failed to fetch modules"
+        data?.error || data?.message || "Failed to fetch modules"
       );
     }
   }
@@ -35,16 +49,16 @@ const accessModulesSlice = createSlice({
   name: "modules",
   initialState: {
     role: null,
-    subrole: null,
-    modules: [],
+    type: null,
+    modules: {}, // ✅ object, not array
     loading: false,
     error: null,
   },
   reducers: {
     clearModules: (state) => {
       state.role = null;
-      state.subrole = null;
-      state.modules = [];
+      state.type = null;
+      state.modules = {};
       state.error = null;
       state.loading = false;
     },
@@ -58,8 +72,8 @@ const accessModulesSlice = createSlice({
       .addCase(fetchAccessModules.fulfilled, (state, action) => {
         state.loading = false;
         state.role = action.payload.role;
-        state.subrole = action.payload.subrole;
-        state.modules = action.payload.modules || [];
+        state.type = action.payload.type;
+        state.modules = action.payload.modules || {}; // ✅ object
       })
       .addCase(fetchAccessModules.rejected, (state, action) => {
         state.loading = false;

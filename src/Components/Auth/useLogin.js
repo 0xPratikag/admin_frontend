@@ -1,4 +1,4 @@
-// src/hooks/useLogin.js
+// Components/Auth/useLogin.js  (ya jaha tum rakho, import path same rakho)
 import { useState } from "react";
 import { loginUser } from "../utils/authService";
 
@@ -6,8 +6,6 @@ const useLogin = () => {
   const [formData, setFormData] = useState({
     email: "",
     password: "",
-    role: "admin", // keep dynamic now
-    subrole: "", // keep dynamic now
   });
 
   const [loading, setLoading] = useState(false);
@@ -19,6 +17,7 @@ const useLogin = () => {
       ...prev,
       [name]: value,
     }));
+    setMessage(null);
   };
 
   const handleSubmit = async (e) => {
@@ -27,52 +26,24 @@ const useLogin = () => {
     setMessage(null);
 
     try {
-      const { email, password, role, subrole, tempPass } = formData;
+      const { email, password } = formData;
 
-      const data = await loginUser(email, password, role, subrole, tempPass);
+      // ✅ sirf email & password jaa rahe hain
+      const data = await loginUser(email, password);
 
-      if (data.subrole) {
-        localStorage.clear();
+      // expected: { token, user: { id, name, email, role, ... } }
+      localStorage.clear();
 
-        //      token,
-        // user: {
-        //   id: invite._id,
-        //   name: invite.name,
-        //   email: invite.email,
-        //   role,
-        //   subRole,
-        // },
-        // password: Random_CreatedPass, // ⚠️ share only via secure channel
-
-        const storingData = {
-            id: data.user.id,
-            role: data.user.role,
-            name: data.user.name,
-            email: data.user.email,
-            subrole: data.user.subrole,
-        };
-
-        localStorage.setItem(`token`, data.token);
-        localStorage.setItem("user", JSON.stringify(storingData));
-      } 
-      
-      else {
-        localStorage.clear();
-
-        const storingData = {
-              id: data.user.id,
-            role: data.user.role,
-            name: data.user.name,
-            email: data.user.email
-        };
-
+      if (data?.token) {
         localStorage.setItem("token", data.token);
-        localStorage.setItem("user", JSON.stringify(storingData));
+      }
+      if (data?.user) {
+        localStorage.setItem("user", JSON.stringify(data.user));
       }
 
       setMessage("Login successful");
-
-      window.location.href = "/admin/dashboard"; // redirect after login
+      // redirect – jo tumhari routing me sahi ho
+      window.location.href = "/dashboard";
     } catch (err) {
       setMessage(err.message || "Something went wrong");
     } finally {
@@ -82,7 +53,7 @@ const useLogin = () => {
 
   return {
     formData,
-    setFormData, // ✅ expose setter (needed in AuthForm)
+    setFormData,
     loading,
     message,
     handleInput,

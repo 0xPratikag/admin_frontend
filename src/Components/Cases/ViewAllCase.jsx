@@ -1,6 +1,7 @@
 // src/pages/ViewAllCase.jsx
 import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
+import { Toaster, toast } from "react-hot-toast";
 
 const statusColor = {
   open: "bg-blue-100 text-blue-800",
@@ -13,11 +14,17 @@ const formatDate = (iso) => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime())
     ? "N/A"
-    : d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    : d.toLocaleDateString("en-IN", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
 };
 
 const Label = ({ children }) => (
-  <span className="text-[11px] uppercase tracking-wide text-gray-500 mr-2">{children}</span>
+  <span className="text-[11px] uppercase tracking-wide text-gray-500 mr-2">
+    {children}
+  </span>
 );
 
 const copyText = async (text) => {
@@ -42,7 +49,8 @@ const CaseCard = ({ caseData }) => {
     createdAt,
   } = caseData || {};
 
-  const handleClick = () => window.open(`/admin/case-details/${_id}`, "_blank");
+  const handleClick = () =>
+    window.open(`/admin/case-details/${_id}`, "_blank");
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-lg transition-all duration-300 overflow-hidden">
@@ -80,7 +88,9 @@ const CaseCard = ({ caseData }) => {
               {/* Case ID */}
               <div className="flex items-center gap-1">
                 <Label>Case ID</Label>
-                <code className="text-xs bg-gray-50 text-gray-700 px-2 py-0.5 rounded">{_id}</code>
+                <code className="text-xs bg-gray-50 text-gray-700 px-2 py-0.5 rounded">
+                  {_id}
+                </code>
                 {_id && (
                   <button
                     onClick={() => copyText(_id)}
@@ -113,7 +123,9 @@ const CaseCard = ({ caseData }) => {
           <div>
             <div>
               <Label>Phone</Label>
-              <span className="text-gray-800">{patient_phone || "N/A"}</span>
+              <span className="text-gray-800">
+                {patient_phone || "N/A"}
+              </span>
             </div>
             {patient_phone_alt && (
               <div className="mt-1">
@@ -134,24 +146,28 @@ const CaseCard = ({ caseData }) => {
             </div>
             <div className="mt-1">
               <Label>Joining Date</Label>
-              <span className="text-gray-800">{formatDate(joining_date)}</span>
+              <span className="text-gray-800">
+                {formatDate(joining_date)}
+              </span>
             </div>
           </div>
         </div>
 
         {/* Meta */}
-        <p className="text-gray-500 text-xs mt-3">🕒 Created: {formatDate(createdAt)}</p>
+        <p className="text-gray-500 text-xs mt-3">
+          🕒 Created: {formatDate(createdAt)}
+        </p>
 
         {/* Actions */}
         <div className="pt-1 flex items-center gap-2">
           <button
-            onClick={() => window.open(`/admin/case-details/${_id}`, "_blank")}
+            onClick={() =>
+              window.open(`/admin/case-details/${_id}`, "_blank")
+            }
             className="text-xs px-3 py-1.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-700"
           >
             View Details
           </button>
-          {/* Tip: your Details page can handle the single-bill flow using
-              GET /cases/:caseId/bill and PUT /cases/:caseId/bill */}
         </div>
       </div>
     </div>
@@ -161,7 +177,8 @@ const CaseCard = ({ caseData }) => {
 const ViewAllCase = () => {
   const [cases, setCases] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  // error will store { status, uiMessage, apiMessage } or null
+  const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
 
   const debounceRef = useRef(null);
@@ -169,25 +186,63 @@ const ViewAllCase = () => {
   const fetchCases = async (q = "") => {
     try {
       setLoading(true);
-      setError("");
+      setError(null);
 
       const url = `${import.meta.env.VITE_API_BASE_URL}/search-cases`;
       const { data } = await axios.get(url, {
         params: q ? { q } : undefined,
-        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
       });
 
       setCases(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Error fetching cases:", err);
-      setError("Failed to load cases. Please try again later.");
+
+      const status = err.response?.status;
+      const apiMessage =
+        err.response?.data?.error ||
+        err.response?.data?.message ||
+        null;
+
+      let uiMessage = "Something went wrong while loading cases.";
+
+      if (status === 403) {
+        uiMessage =
+          "You don’t have permission to view cases yet. Please contact your administrator.";
+      } else if (status === 401) {
+        uiMessage =
+          "Your session has expired. Please log in again to continue.";
+      } else if (!status) {
+        uiMessage =
+          "Unable to reach the server. Please check your internet connection.";
+      }
+
+      // Save structured error for the UI
+      setError({
+        status,
+        uiMessage,
+        apiMessage,
+      });
+
+      // Beautiful toast with quick feedback
+      toast.error(
+        apiMessage && apiMessage !== uiMessage
+          ? apiMessage
+          : uiMessage,
+        {
+          id: "cases-error",
+        }
+      );
+
       setCases([]);
     } finally {
       setLoading(false);
     }
   };
 
-  // Initial load (server-side fetch, scoped by admin)
+  // Initial load
   useEffect(() => {
     fetchCases("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -205,12 +260,19 @@ const ViewAllCase = () => {
 
   return (
     <div className="p-6 w-full bg-gray-50 min-h-screen">
+      {/* Toast container */}
+      <Toaster position="top-right" />
+
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="border-b border-indigo-200 pb-4 mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
           <div>
-            <h2 className="text-3xl font-extrabold text-indigo-800">📋 All Patient Cases</h2>
-            <p className="text-sm text-gray-500 mt-1">Showing {cases.length}</p>
+            <h2 className="text-3xl font-extrabold text-indigo-800">
+              📋 All Patient Cases
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Showing {cases.length}
+            </p>
           </div>
           <input
             type="text"
@@ -221,11 +283,61 @@ const ViewAllCase = () => {
           />
         </div>
 
-        {/* Loading/Error States */}
-        {loading && <div className="text-center text-gray-500">Loading cases...</div>}
-        {error && <div className="text-center text-red-600">{error}</div>}
+        {/* Error block (awesome + shows API message) */}
+        {error && (
+          <div className="mb-6">
+            <div className="max-w-2xl mx-auto bg-white border-l-4 border-red-500 shadow-md rounded-lg p-4 flex gap-3">
+              <div className="text-2xl">🚫</div>
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-red-700">
+                  {error.uiMessage}
+                </p>
+
+                {error.apiMessage && (
+                  <p className="text-xs text-gray-600">
+                    <span className="font-semibold">Server says:</span>{" "}
+                    {error.apiMessage}
+                  </p>
+                )}
+
+                <div className="flex items-center justify-between">
+                  {error.status && (
+                    <span className="inline-flex items-center rounded-full bg-red-50 px-2.5 py-0.5 text-[10px] font-medium text-red-700 uppercase tracking-wide">
+                      HTTP {error.status}
+                    </span>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => fetchCases(searchTerm.trim())}
+                    className="ml-auto text-[11px] px-3 py-1 rounded-md bg-red-600 text-white hover:bg-red-700"
+                  >
+                    Try Again
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Loading State */}
+        {loading && (
+          <div className="text-center text-gray-500 py-10">
+            <div className="inline-flex flex-col items-center gap-2">
+              <div className="h-6 w-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm">Loading cases...</p>
+            </div>
+          </div>
+        )}
+
+        {/* Empty state (only if no error & not loading) */}
         {!loading && !error && cases.length === 0 && (
-          <div className="text-center text-gray-600">No cases found.</div>
+          <div className="text-center text-gray-600 py-10">
+            <p className="text-lg font-medium">No cases found.</p>
+            <p className="text-sm text-gray-400 mt-1">
+              Try adjusting your search or check back later.
+            </p>
+          </div>
         )}
 
         {/* Cards */}
