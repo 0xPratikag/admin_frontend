@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import axios from "axios";
 import { motion, AnimatePresence } from "framer-motion";
-import { handleDownloadInvoiceByCase } from "../Payment/handleDownloadInvoice";
+import { handleDownloadFinalInvoiceByBill, handleDownloadInvoiceByCase } from "../Payment/handleDownloadInvoice";
 
 const ViewBillDetails = () => {
   const { id } = useParams(); // billing id
@@ -63,9 +63,7 @@ const ViewBillDetails = () => {
   const handleClosePay = () => setShowPayChoice(false);
 
   const goOnlinePayment = () => {
-    navigate("/admin/onlinepayment", {
-      state: { billId: id, remaining, grandTotal, patientName: bill?.caseId?.patient_name || "Patient" },
-    });
+   alert("functionality comming soon..")
   };
   const goOfflinePayment = () => {
     navigate("/admin/offlinepayment", {
@@ -77,12 +75,10 @@ const ViewBillDetails = () => {
     navigate(`/admin/generate-bill`, { state: { caseData: bill?.caseId, existingBill: bill } });
   };
 
-  const downloadInvoice = () => {
-    const caseId = bill?.caseId?._id || bill?.caseId;
-    if (!caseId) return;
-    // lock invoice to THIS billing so “overall/paid/due” match the page
-    handleDownloadInvoiceByCase(caseId, { billingId: id, preview: false });
-  };
+const downloadInvoice = () => {
+  handleDownloadFinalInvoiceByBill(id, { preview: false });
+};
+
 
   if (loading) return <div className="p-6">Loading...</div>;
   if (error) {
@@ -125,15 +121,15 @@ const ViewBillDetails = () => {
 
           <div className="flex gap-2 sm:gap-3">
             {/* Show invoice button when any payment happened */}
-            {paidAmount > 0 && (
-              <button
-                onClick={downloadInvoice}
-                className="rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-3 py-2 text-sm font-semibold shadow"
-                title="Download invoice (shows Overall / Paid / Due)"
-              >
-                ⬇️ Download Invoice
-              </button>
-            )}
+ {bill.payment_status === "paid" && (
+  <button
+    onClick={downloadInvoice}
+    className="rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-3 py-2 text-sm font-semibold shadow"
+  >
+    ⬇️ Download Invoice
+  </button>
+)}
+
 
             <button
               onClick={editBill}

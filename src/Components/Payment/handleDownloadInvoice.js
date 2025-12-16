@@ -2,320 +2,648 @@
 import axios from "axios";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import QRCode from "qrcode";
 
-const FALLBACK_LOGO_URL =
-  "https://static.vecteezy.com/system/resources/previews/026/513/688/original/data-analytics-logo-design-growth-arrow-logo-design-for-data-finance-investment-vector.jpg";
+import LOCAL_LOGO from "../../assets/logo.jpeg";
 
-const INR = (n) =>
-  `INR ${(Number(n) || 0).toLocaleString("en-IN", {
+// ✅ jsPDF default fonts don't support ₹ properly, so use "INR" + numbers
+const MONEY = (n) =>
+  (Number(n) || 0).toLocaleString("en-IN", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  })}`;
+  });
 
-async function toDataURL(url) {
-  try {
-    const res = await fetch(url, { mode: "cors" });
-    const blob = await res.blob();
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result);
-      reader.readAsDataURL(blob);
-    });
-  } catch {
-    return null;
-  }
-}
+const INR = (n) => `INR ${MONEY(n)}`;
+
 function getImageTypeFromDataURL(dataURL) {
   if (!dataURL) return "PNG";
   const m = /^data:image\/(png|jpeg|jpg)/i.exec(dataURL);
   const t = (m?.[1] || "png").toLowerCase();
   return t === "jpg" ? "JPEG" : t.toUpperCase();
 }
-function numberToWordsINRClient(n) {
-  const num = Math.round(Number(n) || 0);
-  if (!num) return "INR Zero Only";
-  return `${INR(num)} Only`;
+
+async function dataURLFromAsset(assetUrl) {
+  const res = await fetch(assetUrl);
+  const blob = await res.blob();
+  return new Promise((resolve) => {
+    const r = new FileReader();
+    r.onloadend = () => resolve(r.result);
+    r.readAsDataURL(blob);
+  });
 }
 
-/** Build & download PDF from the unified payload */
+function amountInWordsSimple(n) {
+  const num = Math.round(Number(n) || 0);
+  const ones = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"];
+  const teens = [
+    "Ten",
+    "Eleven",
+    "Twelve",
+    "Thirteen",
+    "Fourteen",
+    "Fifteen",
+    "Sixteen",
+    "Seventeen",
+    "Eighteen",
+    "Nineteen",
+  ];
+  const tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+
+  if (num === 0) return "Zero Rupees Only";
+
+  const crore = Math.floor(num / 10000000);
+  const lakh = Math.floor((num % 10000000) / 100000);
+  const thousand = Math.floor((num % 100000) / 1000);
+  const hundred = Math.floor((num % 1000) / 100);
+  const remainder = num % 100;
+
+  let words = "";
+
+  if (crore > 0)
+    words +=
+      (crore < 10 ? ones[crore] : tens[Math.floor(crore / 10)] + " " + ones[crore % 10]) + " Crore ";
+  if (lakh > 0)
+    words += (lakh < 10 ? ones[lakh] : tens[Math.floor(lakh / 10)] + " " + ones[lakh % 10]) + " Lakh ";
+  if (thousand > 0)
+    words +=
+      (thousand < 10 ? ones[thousand] : tens[Math.floor(thousand / 10)] + " " + ones[thousand % 10]) +
+      " Thousand ";
+  if (hundred > 0) words += ones[hundred] + " Hundred ";
+
+  if (remainder > 0) {
+    if (remainder < 10) words += ones[remainder];
+    else if (remainder < 20) words += teens[remainder - 10];
+    else
+      words += tens[Math.floor(remainder / 10)] + (remainder % 10 ? " " + ones[remainder % 10] : "");
+  }
+
+  return words.trim() + " Rupees Only";
+}
+
+function buildUpiUri({ upiId, upiName, amount, note, merchantCode }) {
+  if (!upiId) return "";
+  const params = new URLSearchParams();
+  params.set("pa", upiId);
+  if (upiName) params.set("pn", upiName);
+  if (merchantCode) params.set("mc", merchantCode);
+
+  if (amount != null && !Number.isNaN(Number(amount))) {
+    params.set("am", Number(amount).toFixed(2));
+  }
+
+  params.set("cu", "INR");
+  if (note) params.set("tn", note);
+
+  return `upi://pay?${params.toString()}`;
+}
+
+async function generateQrDataUrl(text) {
+  if (!text) return null;
+  try {
+    return await QRCode.toDataURL(text, {
+      margin: 1,
+      width: 400,
+      errorCorrectionLevel: "H",
+    });
+  } catch {
+    return null;
+  }
+}
+
+function fmtDateIN(d) {
+  if (!d) return "";
+  const dt = d instanceof Date ? d : new Date(d);
+  if (Number.isNaN(dt.getTime())) return "";
+  return dt.toLocaleDateString("en-GB"); // dd/mm/yyyy
+}
+
+function resolveServicePeriod(invoice) {
+  // Preferred: direct string field from backend
+  const direct =
+    invoice?.servicePeriod || invoice?.validity || invoice?.service_period || invoice?.service_validity;
+
+  if (direct && String(direct).trim()) return String(direct).trim();
+
+  // If backend sends start/end
+  const start = invoice?.periodStart || invoice?.serviceStart || invoice?.startDate || invoice?.service_from;
+  const end = invoice?.periodEnd || invoice?.serviceEnd || invoice?.endDate || invoice?.service_to;
+
+  if (start || end) {
+    const s = fmtDateIN(start) || "-";
+    const e = fmtDateIN(end) || "-";
+    return `${s} - ${e}`;
+  }
+
+  // Fallback: invoice.date -> +30 days
+  const invDateRaw = invoice?.dateISO || invoice?.bill_date || invoice?.date;
+  const invDate = new Date(invDateRaw || Date.now());
+  if (Number.isNaN(invDate.getTime())) return "";
+
+  const endDate = new Date(invDate);
+  endDate.setDate(endDate.getDate() + 30);
+  return `${fmtDateIN(invDate)} - ${fmtDateIN(endDate)}`;
+}
+
 async function buildAndDownloadPDF(payload, { preview = false, filenameFallback = "Invoice" } = {}) {
   const clinic = payload?.clinic || {};
   const invoice = payload?.invoice || {};
   const patient = payload?.patient || {};
   const bank = payload?.bank || {};
-  const declaration = payload?.declaration || "";
-  const signature = payload?.signature || "";
+
+  const declaration =
+    payload?.declaration ||
+    "We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.";
+  const signature = payload?.signature || `for ${clinic.name || "Clinic"}`;
   const jurisdiction = payload?.jurisdiction || "";
 
-  // --- new live totals from API (fallbacks kept) ---
   const overall = Number(payload?.billing?.overallTotal ?? invoice.totalAmount ?? 0);
-  const paid = Number(payload?.billing?.paidTotal ?? 0);
-  const due = Math.max(0, Number(payload?.billing?.dueTotal ?? overall - paid));
-  const dueInWords = numberToWordsINRClient(due);
 
+  const wordsTotal = amountInWordsSimple(overall);
   const services = Array.isArray(invoice.services) ? invoice.services : [];
 
   const doc = new jsPDF({ unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const marginX = 14;
-  const headerH = 42;
-  const CONTENT_MT = 10;
-  const footerH = 14;
+  const marginX = 15;
+  const usableW = pageW - marginX * 2;
 
-  const logoUrl = clinic.logoUrl || clinic.logo || FALLBACK_LOGO_URL;
-  const logoDataURL = await toDataURL(logoUrl);
-  const logoType = getImageTypeFromDataURL(logoDataURL);
+  // ===== LIGHT (B/W FRIENDLY) COLOR PALETTE (SUBTLE) =====
+const C_PRIMARY  = [8, 34, 74];
+const C_PRIMARY2 = [41, 74, 128];
+const C_INK      = [27, 46, 89];    // #1B2E59
+const C_BORDER   = [205, 214, 226];
+const C_ROW_ALT  = [243, 248, 255];
 
-  const drawHeader = () => {
-    doc.setFillColor(4, 120, 210); // sky-600
-    doc.rect(0, 0, pageW, 16, "F");
 
-    if (logoDataURL) doc.addImage(logoDataURL, logoType, pageW - 14 - 24, 8, 24, 24);
 
-    doc.setTextColor(255, 255, 255);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.text(String(clinic.name || "Clinic / Hospital"), marginX, 10);
+  // ===== LIGHT (B/W FRIENDLY) COLOR PALETTE (SUBTLE) =====
+// const C_PRIMARY  = [185, 212, 248];
+// const C_PRIMARY2 = [225, 238, 255];
+// const C_INK      = [18, 40, 85];
+// const C_BORDER   = [205, 214, 226];
+// const C_ROW_ALT  = [243, 248, 255];
 
-    let hy = 18;
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
-    doc.setTextColor(45, 52, 54);
-    [
-      String(clinic.address || ""),
-      `GSTIN: ${clinic.gstin || "-"}`,
-      `State: ${clinic.stateName || "-"} (Code: ${clinic.stateCode || "-"})`,
-      clinic.email ? `Email: ${clinic.email}` : "",
-      clinic.phone ? `Phone: ${clinic.phone}` : "",
-    ]
-      .filter(Boolean)
-      .forEach((line) => {
-        doc.text(line, marginX, hy);
-        hy += 5;
-      });
 
-    doc.setDrawColor(4, 120, 210);
-    doc.setTextColor(4, 120, 210);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.roundedRect(pageW - marginX - 36, 18, 36, 8, 2, 2);
-    doc.text("TAX INVOICE", pageW - marginX - 34, 24);
-  };
+  // ===== PAGE LAYOUT HELPERS (AUTO 2+ PAGES) =====
+  const HEADER_H = 35;
+  const FOOTER_SAFE = 16; // reserve bottom area
+  const CONTENT_TOP = 42;
 
-  const drawFooter = () => {
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
-    doc.setTextColor(120);
-    const pageStr = `Page ${doc.internal.getCurrentPageInfo().pageNumber} of ${doc.internal.getNumberOfPages()}`;
-    doc.text(pageStr, pageW - marginX, pageH - 6, { align: "right" });
-    if (clinic.email) doc.text(clinic.email, marginX, pageH - 6);
-  };
+  // Preload logo once (important for multi-page)
+  let logoDataURL = null;
+  let logoType = "JPEG";
+  try {
+    logoDataURL = await dataURLFromAsset(LOCAL_LOGO);
+    logoType = getImageTypeFromDataURL(logoDataURL);
+  } catch {
+    /* ignore */
+  }
 
-  const addHeaderFooterToAll = () => {
-    const pages = doc.internal.getNumberOfPages();
-    for (let i = 1; i <= pages; i++) {
-      doc.setPage(i);
-      drawHeader();
-      drawFooter();
+  function drawHeaderBar() {
+    doc.setFillColor(...C_PRIMARY);
+    doc.rect(0, 0, pageW, HEADER_H, "F");
+
+    doc.setFillColor(...C_PRIMARY2);
+    doc.rect(0, 0, pageW, 28, "F");
+
+    // Logo - top right
+    if (logoDataURL) {
+      const logoW = 24;
+      const logoH = 18;
+
+      doc.setFillColor(255, 255, 255);
+      doc.roundedRect(pageW - marginX - logoW - 2, 8, logoW + 4, logoH + 4, 2, 2, "F");
+      doc.addImage(logoDataURL, logoType, pageW - marginX - logoW, 10, logoW, logoH);
     }
-  };
 
-  // Buyer + Invoice Details
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(33);
-  doc.setFontSize(11);
+// Clinic Name (WHITE)
+doc.setFont("helvetica", "bold");
+doc.setFontSize(18);
+doc.setTextColor(255, 255, 255);
+doc.text(String("INDIA THERAPY CENTRE").toUpperCase(), marginX, 19);
 
-  const colW = 95;
-  let y = headerH;
+// subtitle (WHITE)
+doc.setFont("helvetica", "normal");
+doc.setFontSize(10);
+doc.setTextColor(255, 255, 255);
+doc.text(`By ${clinic.name || ""}`, marginX, 24);
 
-  doc.text("Buyer (Bill to)", marginX, y);
-  doc.setDrawColor(220);
-  doc.roundedRect(marginX, y + 2, colW, 34, 2, 2);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(60);
-  doc.setFontSize(9);
 
-  let by = y + 9;
-  [
-    `${patient.name || "Patient"}  (P.ID: ${patient.p_id || patient.caseId || "-"})`,
-    `Phone: ${patient.phone || "N/A"}`,
-    `Case Type: ${patient.caseType || "-"}`,
-    `State: ${patient.stateName || "-"} (Code: ${patient.stateCode || "-"})`,
-    `Place of Supply: ${patient.placeOfSupply || patient.stateName || "-"}`,
-  ].forEach((l) => {
-    doc.text(l, marginX + 3, by);
-    by += 5;
-  });
+    // Invoice number (small) - right
+    doc.setFontSize(8);
+    doc.setTextColor(70, 70, 70);
+    // doc.text(`Invoice: ${String(invoice.number || filenameFallback)}`, pageW - marginX, 24, { align: "right" });
 
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(33);
-  doc.text("Invoice Details", marginX + colW + 6, y);
-  doc.setDrawColor(220);
-  doc.roundedRect(marginX + colW + 6, y + 2, colW - 6, 34, 2, 2);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(60);
-  doc.setFontSize(9);
+    doc.setTextColor(40, 40, 40);
+  }
 
-  let my = y + 10;
-  const invoiceMeta = [
-    ["Invoice No:", invoice.number || filenameFallback],
-    ["Dated:", invoice.date || "-"],
-    ["Invoice Status:", (invoice.status || "-").toString().toUpperCase()],
-  ];
-  invoiceMeta.forEach(([k, v]) => {
-    doc.setFont("helvetica", "bold");
-    doc.text(k, marginX + colW + 9, my);
+  function drawFooter() {
+    const footerY = pageH - 10;
+
+    doc.setDrawColor(...C_BORDER);
+    doc.setLineWidth(0.3);
+    doc.line(marginX, footerY - 4, pageW - marginX, footerY - 4);
+
     doc.setFont("helvetica", "normal");
-    doc.text(String(v), marginX + colW + 42, my);
-    my += 6;
+    doc.setFontSize(7);
+    doc.setTextColor(120, 120, 120);
+
+    if (jurisdiction) {
+      doc.text(`Subject to ${jurisdiction} Jurisdiction`, marginX, footerY);
+    }
+
+    doc.text(`Generated on ${new Date().toLocaleDateString("en-IN")}`, pageW / 2, footerY, {
+      align: "center",
+    });
+
+    if (clinic.email) {
+      doc.text(clinic.email, pageW - marginX, footerY, { align: "right" });
+    }
+  }
+
+  let currentY = CONTENT_TOP;
+
+  function ensureSpace(requiredH) {
+    const limit = pageH - FOOTER_SAFE;
+    if (currentY + requiredH > limit) {
+      // close current page
+      drawFooter();
+      doc.addPage();
+      drawHeaderBar();
+      currentY = CONTENT_TOP;
+    }
+  }
+
+  // ===== FIRST PAGE HEADER =====
+  drawHeaderBar();
+
+  // ===== CLINIC & INVOICE INFO =====
+  const infoY = 42;
+  const infoLeftW = usableW * 0.55;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9);
+  doc.setTextColor(...C_INK);
+  doc.text("FROM", marginX, infoY);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8.5);
+  doc.setTextColor(60, 60, 60);
+
+  const clinicInfo = [
+    clinic.address || "",
+    clinic.phone ? `Phone: ${clinic.phone}` : "",
+    clinic.email ? `Email: ${clinic.email}` : "",
+    clinic.gstin ? `GSTIN: ${clinic.gstin}` : "",
+    clinic.stateName ? `State: ${clinic.stateName} (${clinic.stateCode || "-"})` : "",
+  ].filter(Boolean);
+
+  let y = infoY + 5;
+  clinicInfo.forEach((line) => {
+    const wrapped = doc.splitTextToSize(line, infoLeftW - 5);
+    wrapped.forEach((l) => {
+      doc.text(l, marginX, y);
+      y += 4;
+    });
   });
 
-  // Line items
-  const head = ["Description of Service", "HSN/SAC", "Amount (INR)"];
+  // Right side - meta box
+  const metaX = marginX + infoLeftW + 8;
+  const metaW = usableW - infoLeftW - 8;
+  const metaH = 46; // fits Service Period
+
+  doc.setFillColor(245, 248, 252);
+  doc.roundedRect(metaX, infoY - 4, metaW, metaH, 2, 2, "FD");
+
+  const statusText = String((invoice.status || "PAID").toUpperCase());
+  const servicePeriod = resolveServicePeriod(invoice);
+
+  const metaData = [
+    { label: "Invoice No", value: String(invoice.number || filenameFallback) },
+    { label: "Date", value: String(invoice.date || "-") },
+    { label: "Service Period", value: servicePeriod || "-" },
+    {
+      label: "Status",
+      value: statusText,
+      color: statusText === "PAID" ? [34, 139, 34] : [255, 140, 0],
+    },
+    { label: "Total", value: INR(overall) },
+  ];
+
+  y = infoY + 2;
+  metaData.forEach((item) => {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.3);
+    doc.setTextColor(120, 120, 120);
+    doc.text(item.label, metaX + 4, y);
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.7);
+    if (item.color) doc.setTextColor(item.color[0], item.color[1], item.color[2]);
+    else doc.setTextColor(40, 40, 40);
+
+    if (item.label === "Service Period") {
+      const maxW = metaW - 40;
+      const wrapped = doc.splitTextToSize(String(item.value), maxW);
+      doc.text(wrapped, metaX + metaW - 4, y, { align: "right" });
+      y += wrapped.length > 1 ? 10 : 9.5;
+      return;
+    }
+
+    doc.text(String(item.value), metaX + metaW - 4, y, { align: "right" });
+    y += 9.5;
+  });
+
+  // ===== BILL TO =====
+ const billToY = infoY + metaH + 0; // ✅ 5mm upar
+
+
+  doc.setFillColor(252, 252, 253);
+  doc.roundedRect(marginX, billToY, usableW, 32, 2, 2, "FD");
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9);
+  doc.setTextColor(...C_INK);
+  doc.text("BILL TO", marginX + 4, billToY + 6);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8.5);
+  doc.setTextColor(60, 60, 60);
+
+  const col1X = marginX + 4;
+  const col2X = marginX + usableW / 2;
+
+  const patientCol1 = [
+    `Patient: ${patient.name || "-"}`,
+    patient.phone ? `Phone: ${patient.phone}` : "",
+    `Patient ID: ${patient.p_id || "-"}`,
+  ].filter(Boolean);
+
+  const patientCol2 = [
+    `Case ID: ${patient.caseId || "-"}`,
+    `State: ${patient.stateName || "-"} (${patient.stateCode || "-"})`,
+    `Place of Supply: ${patient.placeOfSupply || patient.stateName || "-"}`,
+  ].filter(Boolean);
+
+  y = billToY + 11;
+  patientCol1.forEach((line) => {
+    doc.text(line, col1X, y);
+    y += 5;
+  });
+
+  y = billToY + 11;
+  patientCol2.forEach((line) => {
+    doc.text(line, col2X, y);
+    y += 5;
+  });
+
+  // ===== ITEMS TABLE =====
+  const tableY = billToY + 34;
+
+  const head = [["Description of Services", "Per Session Cost", "Total Sessions", "Amount"]];
+
   const body =
     services.length > 0
-      ? services.map((it) => [it.name || "-", it.hsn || "9993", INR(it.cost || 0)])
-      : [["Consultation / Therapy", "9993", INR(overall)]];
+      ? services.map((s) => {
+          const sessions =
+            Number(s.total_sessions) ||
+            Number(s.totalSessions) ||
+            Number(s.qty) ||
+            Number(s.quantity) ||
+            1;
+
+          const perSession =
+            s.perSessionCost != null
+              ? Number(s.perSessionCost)
+              : s.rate != null
+              ? Number(s.rate)
+              : s.amount != null
+              ? Number(s.amount) / sessions
+              : s.cost != null
+              ? Number(s.cost) / sessions
+              : 0;
+
+          const amount =
+            s.amount != null
+              ? Number(s.amount)
+              : s.cost != null
+              ? Number(s.cost)
+              : perSession * sessions;
+
+          const desc = s.description || s.name || "-";
+
+          return [desc, MONEY(perSession), String(sessions), MONEY(amount)];
+        })
+      : [["Consultation / Therapy", MONEY(overall), "1", MONEY(overall)]];
 
   autoTable(doc, {
-    head: [head],
+    head,
     body,
-    startY: y + CONTENT_MT + 24,
-    margin: { left: marginX, right: marginX, top: headerH, bottom: footerH },
-    styles: { font: "helvetica", fontSize: 9, lineColor: 220, lineWidth: 0.1 },
-    headStyles: { fillColor: [240, 246, 255], textColor: 30, halign: "left" },
-    bodyStyles: { textColor: 40 },
-    alternateRowStyles: { fillColor: [252, 252, 252] },
-    columnStyles: { 2: { halign: "right" } },
-    theme: "striped",
+    startY: tableY,
+    margin: { left: marginX, right: marginX },
+    styles: {
+      font: "helvetica",
+      fontSize: 8.5,
+      lineWidth: 0.2,
+      lineColor: C_BORDER,
+      cellPadding: 3,
+      valign: "middle",
+    },
+    headStyles: {
+      fillColor: C_PRIMARY,
+     textColor: [255, 255, 255], // ✅ white
+      fontStyle: "bold",
+      fontSize: 9,
+      halign: "center",
+    },
+    bodyStyles: {
+      textColor: [50, 50, 50],
+    },
+    alternateRowStyles: {
+      fillColor: C_ROW_ALT,
+    },
+    columnStyles: {
+      0: { cellWidth: 83, halign: "left" },
+      1: { cellWidth: 35, halign: "right" },
+      2: { cellWidth: 25, halign: "center" },
+      3: { cellWidth: 37, halign: "right", fontStyle: "bold", textColor: C_INK },
+    },
+
+    // ✅ If table goes to next page, draw header/footer again
     didDrawPage: () => {
-      drawHeader();
+      drawHeaderBar();
       drawFooter();
     },
   });
 
-  let afterTableY = doc.lastAutoTable.finalY + 6;
+  // After table, set currentY for next blocks
+  currentY = doc.lastAutoTable.finalY + 0.5;
 
-  // Amount Due (words) + Totals (Overall/Paid/Due)
-  const rightBoxW = 64;
-  const rightX = pageW - marginX - rightBoxW;
+  // ===== TOTAL SECTION =====
+  const totalBoxH = 10;
+  const totalLabelW = usableW - 31;
+
+  ensureSpace(totalBoxH + 8);
+
+  doc.setFillColor(...C_PRIMARY);
+  doc.rect(marginX, currentY, usableW, totalBoxH, "F");
 
   doc.setFont("helvetica", "bold");
-  doc.setTextColor(33);
-  doc.setFontSize(10);
-  doc.text("Amount Due (in words)", marginX, afterTableY);
-  const words = doc.splitTextToSize(dueInWords, pageW - marginX * 2 - rightBoxW - 6);
-  doc.setDrawColor(220);
-  doc.roundedRect(
-    marginX,
-    afterTableY + 2,
-    pageW - marginX * 2 - rightBoxW - 6,
-    words.length * 5 + 6,
-    2,
-    2
-  );
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(60);
+  doc.setFontSize(11);
+doc.setTextColor(255, 255, 255); // ✅ white
+doc.text("TOTAL", marginX + totalLabelW - 5, currentY + 7, { align: "right" });
+doc.text(INR(overall), pageW - marginX - 6, currentY + 7, { align: "right" });
+
+  currentY += totalBoxH + 5;
+
+  // ===== AMOUNT IN WORDS =====
+  const wordsBoxH = 14;
+
+  ensureSpace(wordsBoxH + 8);
+
+  doc.setFillColor(248, 250, 252);
+  doc.roundedRect(marginX, currentY, usableW, wordsBoxH, 2, 2, "FD");
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8);
+  doc.setTextColor(100, 100, 100);
+  doc.text("Amount in Words", marginX + 4, currentY + 5);
+
+  doc.setFont("helvetica", "bold");
   doc.setFontSize(9);
-  doc.text(words, marginX + 3, afterTableY + 8);
+  doc.setTextColor(...C_INK);
+  const wordsWrapped = doc.splitTextToSize(wordsTotal, usableW - 8);
+  doc.text(wordsWrapped, marginX + 4, currentY + 10);
 
-  const totY = afterTableY + 2;
-  doc.setDrawColor(220);
-  doc.roundedRect(rightX, totY, rightBoxW, 42, 2, 2);
-  doc.setFontSize(9);
-  doc.setTextColor(70);
+  currentY += wordsBoxH + 3;
 
-  let ty = totY + 8;
-  [
-    ["Overall", INR(overall)],
-    ["Paid to Date", INR(paid)],
-    ["Amount Due", INR(due)],
-  ].forEach(([k, v], i) => {
-    doc.setFont("helvetica", i === 2 ? "bold" : "normal");
-    doc.text(k, rightX + 4, ty);
-    doc.text(v, rightX + rightBoxW - 4, ty, { align: "right" });
-    ty += 12;
-  });
+  // ===== BANK DETAILS & QR CODE =====
+  const showPaymentBox = bank?.showOnInvoice !== false;
+  if (showPaymentBox) {
+    const allowQr = bank?.enableUpiQr !== false && !!bank?.upiId;
+    const upiNote =
+      bank?.upiNote || `Invoice ${invoice.number || ""} - ${patient.name || ""} (PID:${patient.p_id || "-"})`;
 
-  afterTableY += Math.max(words.length * 5 + 10, 46) + 6;
+    const upiUri = allowQr
+      ? buildUpiUri({
+          upiId: bank.upiId,
+          upiName: bank.upiName || bank.accountHolder || clinic.name,
+          amount: overall,
+          note: upiNote,
+          merchantCode: bank.upiMerchantCode || "",
+        })
+      : "";
 
-  // Page break if needed
-  if (afterTableY > pageH - footerH - 60) {
-    doc.addPage();
-    drawHeader();
-    afterTableY = headerH + 6;
-  }
+    const qrDataUrl = allowQr ? await generateQrDataUrl(upiUri) : null;
 
-  // Declaration + Bank
-  const colW2 = (pageW - marginX * 2 - 6) / 2;
-  const leftX = marginX;
-  const rightColX = marginX + colW2 + 6;
+    const bankBoxH = 50;
+    const qrSize = 36;
 
-  if (declaration) {
+    ensureSpace(bankBoxH + 8);
+
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(...C_BORDER);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(marginX, currentY, usableW, bankBoxH, 2, 2, "FD");
+
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(10);
-    doc.setTextColor(33);
-    doc.text("Declaration", leftX, afterTableY);
-    const decl = doc.splitTextToSize(declaration, colW2);
-    doc.setDrawColor(220);
-    doc.roundedRect(leftX, afterTableY + 2, colW2, decl.length * 5 + 8, 2, 2);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(60);
     doc.setFontSize(9);
-    doc.text(decl, leftX + 3, afterTableY + 8);
-  }
+    doc.setTextColor(...C_INK);
+    doc.text("PAYMENT DETAILS", marginX + 4, currentY + 6);
 
-  {
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10);
-    doc.setTextColor(33);
-    doc.text("Company's Bank Details", rightColX, afterTableY);
-    const bankLines = [
-      `A/c Holder: ${bank.accountHolder || "-"}`,
-      `Bank: ${bank.bankName || "-"}`,
-      `A/c No.: ${bank.accountNumber || "-"}`,
-      `Branch & IFSC: ${bank.branch || "-"} & ${bank.ifsc || "-"}`,
-    ];
-    const bankH = bankLines.length * 6 + 8;
-    doc.setDrawColor(220);
-    doc.roundedRect(rightColX, afterTableY + 2, colW2, bankH, 2, 2);
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(60);
-    doc.setFontSize(9);
-    let by2 = afterTableY + 10;
-    bankLines.forEach((l) => {
-      doc.text(l, rightColX + 3, by2);
-      by2 += 6;
+    doc.setFontSize(8);
+    doc.setTextColor(60, 60, 60);
+
+    const bankDetails = [
+      `Account Holder: ${bank.accountHolder || clinic.name || "-"}`,
+      `Bank Name: ${bank.bankName || "-"}`,
+      `Account Number: ${bank.accountNumber || "-"}`,
+      `IFSC Code: ${bank.ifsc || "-"}`,
+      `Branch: ${bank.branch || "-"}`,
+      bank.upiId ? `UPI ID: ${bank.upiId}` : "",
+    ].filter(Boolean);
+
+    y = currentY + 11;
+    const bankTextWidth = qrDataUrl ? usableW - qrSize - 16 : usableW - 8;
+
+    bankDetails.forEach((line) => {
+      const wrapped = doc.splitTextToSize(line, bankTextWidth);
+      wrapped.forEach((l) => {
+        doc.text(l, marginX + 4, y);
+        y += 4.5;
+      });
     });
 
-    const declHeight = declaration ? doc.splitTextToSize(declaration, colW2).length * 5 + 16 : 0;
-    afterTableY += Math.max(declHeight, bankH + 10) + 10;
+    if (qrDataUrl) {
+      const qrX = pageW - marginX - qrSize - 4;
+      const qrY = currentY + 4;
+
+      doc.setFillColor(255, 255, 255);
+      doc.setDrawColor(...C_INK);
+      doc.setLineWidth(0.4);
+      doc.roundedRect(qrX - 2, qrY - 2, qrSize + 4, qrSize + 4, 2, 2, "FD");
+
+      const type = getImageTypeFromDataURL(qrDataUrl);
+      doc.addImage(qrDataUrl, type, qrX, qrY, qrSize, qrSize);
+
+      doc.setFillColor(...C_PRIMARY);
+      doc.roundedRect(qrX - 2, qrY + qrSize + 3, qrSize + 4, 6, 1, 1, "F");
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(7.5);
+doc.setTextColor(255, 255, 255);
+doc.text("SCAN TO PAY", qrX + qrSize / 2, qrY + qrSize + 7, { align: "center" });
+
+    }
+
+    currentY += bankBoxH + 8;
   }
 
-  if (afterTableY > pageH - footerH - 30) {
-    doc.addPage();
-    drawHeader();
-    afterTableY = headerH + 10;
-  }
+  // ===== DECLARATION & SIGNATURE =====
+  const declH = 18;
+  const sigW = 60;
+  const declW = usableW - sigW - 4;
+
+  ensureSpace(declH + 6);
+
+  doc.setFillColor(252, 252, 253);
+  doc.setDrawColor(...C_BORDER);
+  doc.roundedRect(marginX, currentY, declW, declH, 2, 2, "FD");
+
   doc.setFont("helvetica", "bold");
-  doc.setTextColor(33);
-  doc.text(signature || `for ${clinic.name || "Clinic"}`, pageW - marginX - 60, afterTableY);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(60);
-  doc.text("Authorised Signatory", pageW - marginX - 60, afterTableY + 6);
+  doc.setFontSize(8);
+  doc.setTextColor(100, 100, 100);
+  doc.text("Declaration", marginX + 4, currentY + 5);
 
   doc.setFont("helvetica", "normal");
-  doc.setTextColor(100);
-  doc.setFontSize(9);
-  if (jurisdiction) {
-    doc.text(`SUBJECT TO ${jurisdiction} JURISDICTION`, marginX, afterTableY + 6);
-  }
+  doc.setFontSize(7.5);
+  doc.setTextColor(80, 80, 80);
+  const declWrapped = doc.splitTextToSize(declaration, declW - 8);
+  doc.text(declWrapped, marginX + 4, currentY + 10);
 
-  addHeaderFooterToAll();
+  const sigX = marginX + declW + 4;
+
+  doc.setFillColor(252, 252, 253);
+  doc.setDrawColor(...C_BORDER);
+  doc.roundedRect(sigX, currentY, sigW, declH, 2, 2, "FD");
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(80, 80, 80);
+  doc.text(signature, sigX + 4, currentY + declH - 10);
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8);
+  doc.setTextColor(...C_INK);
+  doc.text("Authorized Signatory", sigX + 4, currentY + declH - 4);
+
+  // ===== FINAL FOOTER (ALWAYS) =====
+  drawFooter();
 
   const safeNumber = String(invoice.number || filenameFallback).replace(/[^\w-]/g, "_");
   const fileName = `Invoice_${safeNumber}.pdf`;
+
   if (preview) {
     const url = doc.output("bloburl");
     window.open(url, "_blank");
@@ -324,16 +652,34 @@ async function buildAndDownloadPDF(payload, { preview = false, filenameFallback 
   }
 }
 
-/** Public: Download/preview invoice BY CASE (optionally lock to a billing) */
+/** Public: Download/preview invoice BY CASE */
 export async function handleDownloadInvoiceByCase(caseId, { billingId, preview = false } = {}) {
   const token = localStorage.getItem("token");
   const baseURL = import.meta.env.VITE_API_BASE_URL;
   const q = billingId ? `?billingId=${billingId}` : "";
+
   try {
     const { data } = await axios.get(`${baseURL}/invoice/by-case/${caseId}${q}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     await buildAndDownloadPDF(data, { preview, filenameFallback: caseId });
+  } catch (err) {
+    console.error(err);
+    alert("Failed to download invoice: " + (err?.response?.data?.error || err.message));
+  }
+}
+
+/** Public: Download/preview FINAL invoice BY BILL */
+export async function handleDownloadFinalInvoiceByBill(billId, { preview = false } = {}) {
+  const token = localStorage.getItem("token");
+  const baseURL = import.meta.env.VITE_API_BASE_URL;
+
+  try {
+    const { data } = await axios.get(`${baseURL}/invoices/final/by-bill/${billId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    await buildAndDownloadPDF(data, { preview, filenameFallback: billId });
   } catch (err) {
     console.error(err);
     alert("Failed to download invoice: " + (err?.response?.data?.error || err.message));
