@@ -1,4 +1,14 @@
-import React, { useEffect, useState, useMemo, useCallback, useRef } from "react";
+yedi koi age dale to dob auto fill hojaay us hisab se..
+
+yaa fir koi dob daale to age auto fill hojaay us hisabb se. ok
+
+
+joing date by default today ka dena baad me user chaahe to daate update krskte hai joinig ka.
+
+give me full updated code
+
+
+import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 
@@ -12,41 +22,9 @@ const baseInputCls = "border rounded w-full p-2 focus:outline-none transition";
 const normalBorder = "border-gray-300 focus:ring-2 focus:ring-indigo-500";
 const errorBorder = "border-red-500 focus:ring-2 focus:ring-red-500";
 
+// ❌ Removed PID_REGEX – we don't restrict format for Client ID
+
 const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL });
-
-// -------- DOB/Age helpers --------
-const pad2 = (n) => String(n).padStart(2, "0");
-const toISODate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-
-function isValidDateString(s) {
-  if (!s) return false;
-  const d = new Date(s);
-  return d.toString() !== "Invalid Date";
-}
-
-// Age (years) from dob
-function calcAgeFromDob(dobStr) {
-  if (!isValidDateString(dobStr)) return "";
-  const dob = new Date(dobStr);
-  const today = new Date();
-  let age = today.getFullYear() - dob.getFullYear();
-  const m = today.getMonth() - dob.getMonth();
-  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
-  if (age < 0) return "";
-  return String(age);
-}
-
-// DOB from age (approx): sets year = todayYear - age, month/day = today
-function calcDobFromAge(ageVal) {
-  const a = Number(ageVal);
-  if (!Number.isFinite(a) || a < 0) return "";
-  const today = new Date();
-  const y = today.getFullYear() - Math.floor(a);
-  const m = today.getMonth();
-  const d = today.getDate();
-  const dob = new Date(y, m, d);
-  return toISODate(dob);
-}
 
 export default function CreateCase() {
   const { caseId } = useParams();
@@ -58,18 +36,15 @@ export default function CreateCase() {
     []
   );
 
-  // track last field user edited (to prevent DOB<->Age loop)
-  const lastEditedRef = useRef(null); // "dob" | "age" | null
-
   const [formData, setFormData] = useState({
-    p_id: "",
+    p_id: "", // internally still p_id, UI shows "Client ID"
     patient_name: "",
     patient_phone: "",
     patient_phone_alt: "",
     gender: "",
     dob: "",
     age: "",
-    joining_date: "", // set default below
+    joining_date: "",
     grant_app_access: false,
     address: {
       line1: "",
@@ -103,24 +78,14 @@ export default function CreateCase() {
   // Conditions chip input
   const [conditionInput, setConditionInput] = useState("");
 
-  // Client ID verify UI state
+  // Client ID verify UI state (was P.ID)
   const [pidStatus, setPidStatus] = useState({ state: "idle", msg: "" });
+  // states: idle | checking | available | unavailable | invalid | error
 
   const [errors, setErrors] = useState({});
   const [loading, setLoading] = useState(!!caseId);
   const [success, setSuccess] = useState("");
   const [error, setError] = useState("");
-
-  // ---------- set default joining date (create mode) ----------
-  useEffect(() => {
-    if (!isUpdate) {
-      const todayStr = toISODate(new Date());
-      setFormData((p) => ({
-        ...p,
-        joining_date: p.joining_date || todayStr, // default today only if empty
-      }));
-    }
-  }, [isUpdate]);
 
   // ---------- fetch therapy catalog (active only) ----------
   const fetchTherapies = async () => {
@@ -196,7 +161,9 @@ export default function CreateCase() {
                   }))
                 : [],
               therapyTestsEnabled: !!t.therapyTestsEnabled,
-              tests: Array.isArray(t.tests) ? t.tests.map((x) => ({ testId: String(x.testId) })) : [],
+              tests: Array.isArray(t.tests)
+                ? t.tests.map((x) => ({ testId: String(x.testId) }))
+                : [],
             }))
           : [];
 
@@ -260,12 +227,15 @@ export default function CreateCase() {
 
   const validate = (data) => {
     const nextErrors = {};
+
     const get = (obj, path) => path.split(".").reduce((o, k) => (o ? o[k] : undefined), obj);
 
     REQUIRED_FIELDS.forEach((key) => {
       const v = get(data, key);
       if (v === undefined || v === null || String(v).trim() === "") {
-        nextErrors[key] = `Please fill this field (${key}).`;
+        const label = key
+
+        nextErrors[key] = `Please fill this field (${label}).`;
       }
     });
 
@@ -279,6 +249,15 @@ export default function CreateCase() {
       if (dob.toString() !== "Invalid Date" && join.toString() !== "Invalid Date" && join < dob) {
         nextErrors["joining_date"] = "Joining date cannot be before D.O.B.";
       }
+    }
+
+    // ✅ No client-side format restriction for Client ID now
+
+    // (Optional) Basic therapy plan validation — ensure no invalid IDs
+    if (therapyPlan.length) {
+      const validTherapies = new Set(therapyList.map((t) => String(t._id)));
+      const anyBadTherapy = therapyPlan.some((t) => !validTherapies.has(String(t.therapyId)));
+      if (anyBadTherapy) nextErrors["therapy_plan"] = "Therapy plan contains invalid therapy id(s).";
     }
 
     return nextErrors;
@@ -301,11 +280,12 @@ export default function CreateCase() {
     clearError(name);
   };
 
-  // Client ID change
+  // Client ID change (no uppercase, no restriction)
   const handlePidChange = (e) => {
     const val = e.target.value;
     setFormData((p) => ({ ...p, p_id: val }));
     clearError("p_id");
+    // reset verify state whenever user types
     setPidStatus({ state: "idle", msg: "" });
   };
 
@@ -342,51 +322,6 @@ export default function CreateCase() {
     for (let i = 0; i < options.length; i++) if (options[i].selected) selected.push(options[i].value);
     setFormData((p) => ({ ...p, [key]: selected }));
   };
-
-  // ✅ DOB → Age
-  const handleDobChange = (e) => {
-    const dob = e.target.value;
-    lastEditedRef.current = "dob";
-    setFormData((p) => {
-      const nextAge = calcAgeFromDob(dob);
-      return { ...p, dob, age: nextAge };
-    });
-    clearError("dob");
-  };
-
-  // ✅ Age → DOB
-  const handleAgeChange = (e) => {
-    const age = e.target.value;
-    lastEditedRef.current = "age";
-    setFormData((p) => {
-      // user cleared age → don't force dob
-      if (age === "" || age == null) return { ...p, age };
-      const nextDob = calcDobFromAge(age);
-      return { ...p, age, dob: nextDob || p.dob };
-    });
-    clearError("age");
-  };
-
-  // If case is loaded (update mode), ensure sync if only one exists
-  useEffect(() => {
-    // keep as a soft sync without looping
-    setFormData((p) => {
-      // if both present, do nothing
-      if (p.dob && p.age !== "" && p.age != null) return p;
-
-      // if dob present but age missing -> fill age
-      if (p.dob && (p.age === "" || p.age == null)) {
-        return { ...p, age: calcAgeFromDob(p.dob) };
-      }
-
-      // if age present but dob missing -> fill dob
-      if (!p.dob && p.age !== "" && p.age != null) {
-        return { ...p, dob: calcDobFromAge(p.age) };
-      }
-
-      return p;
-    });
-  }, [isUpdate, loading]);
 
   // --------- Conditions manual input helpers ----------
   const addCondition = (raw) => {
@@ -432,7 +367,10 @@ export default function CreateCase() {
     if (!tid) return;
     if (therapyPlan.find((t) => String(t.therapyId) === tid)) return;
     await loadCatalogForTherapy(tid);
-    setTherapyPlan((p) => [...p, { therapyId: tid, subTherapy: [], therapyTestsEnabled: false, tests: [] }]);
+    setTherapyPlan((p) => [
+      ...p,
+      { therapyId: tid, subTherapy: [], therapyTestsEnabled: false, tests: [] },
+    ]);
     clearError("therapy_plan");
   };
 
@@ -459,13 +397,20 @@ export default function CreateCase() {
           if (!updated.pricePerSession && !updated.pricePerPackage) {
             return { ...blk, subTherapy: blk.subTherapy.filter((s) => String(s.subTherapyId) !== sid) };
           }
-          return { ...blk, subTherapy: blk.subTherapy.map((s) => (String(s.subTherapyId) === sid ? updated : s)) };
+          return {
+            ...blk,
+            subTherapy: blk.subTherapy.map((s) => (String(s.subTherapyId) === sid ? updated : s)),
+          };
         }
         return {
           ...blk,
           subTherapy: [
             ...blk.subTherapy,
-            { subTherapyId: sid, pricePerSession: flagKey === "pricePerSession", pricePerPackage: flagKey === "pricePerPackage" },
+            {
+              subTherapyId: sid,
+              pricePerSession: flagKey === "pricePerSession",
+              pricePerPackage: flagKey === "pricePerPackage",
+            },
           ],
         };
       })
@@ -476,7 +421,11 @@ export default function CreateCase() {
     const tid = String(therapyId);
     loadCatalogForTherapy(tid);
     setTherapyPlan((prev) =>
-      prev.map((blk) => (String(blk.therapyId) === tid ? { ...blk, therapyTestsEnabled: !blk.therapyTestsEnabled } : blk))
+      prev.map((blk) =>
+        String(blk.therapyId) === tid
+          ? { ...blk, therapyTestsEnabled: !blk.therapyTestsEnabled }
+          : blk
+      )
     );
   };
 
@@ -487,7 +436,9 @@ export default function CreateCase() {
       prev.map((blk) => {
         if (String(blk.therapyId) !== tid) return blk;
         const exists = blk.tests.find((t) => String(t.testId) === xid);
-        return exists ? { ...blk, tests: blk.tests.filter((t) => String(t.testId) !== xid) } : { ...blk, tests: [...blk.tests, { testId: xid }] };
+        return exists
+          ? { ...blk, tests: blk.tests.filter((t) => String(t.testId) !== xid) }
+          : { ...blk, tests: [...blk.tests, { testId: xid }] };
       })
     );
   };
@@ -495,12 +446,16 @@ export default function CreateCase() {
   const setAllTestsForTherapy = (therapyId) => {
     const tid = String(therapyId);
     const all = (catalogs[tid]?.tests || []).map((t) => ({ testId: String(t._id) }));
-    setTherapyPlan((prev) => prev.map((blk) => (String(blk.therapyId) === tid ? { ...blk, tests: all } : blk)));
+    setTherapyPlan((prev) =>
+      prev.map((blk) => (String(blk.therapyId) === tid ? { ...blk, tests: all } : blk))
+    );
   };
 
   const clearAllTestsForTherapy = (therapyId) => {
     const tid = String(therapyId);
-    setTherapyPlan((prev) => prev.map((blk) => (String(blk.therapyId) === tid ? { ...blk, tests: [] } : blk)));
+    setTherapyPlan((prev) =>
+      prev.map((blk) => (String(blk.therapyId) === tid ? { ...blk, tests: [] } : blk))
+    );
   };
 
   const therapyNameById = useMemo(
@@ -511,8 +466,11 @@ export default function CreateCase() {
   const fieldCls = (key) => `${baseInputCls} ${errors[key] ? errorBorder : normalBorder}`;
   const ErrorText = ({ msg }) => (msg ? <p className="text-sm text-red-600 mt-1">{msg}</p> : null);
 
-  // ---------- Client ID verify call ----------
+  // ---------- Client ID verify call (was P.ID) ----------
   const verifyPid = async () => {
+
+    console.log(formData.p_id);
+    
     try {
       const val = String(formData.p_id || "");
       if (!val) {
@@ -524,9 +482,8 @@ export default function CreateCase() {
 
       const res = await api.get(`/cases/verify-pid`, {
         headers: authHeaders,
-        params: { p_id: val },
+        params: { p_id: val }, // backend still expects p_id
       });
-
       if (res.data?.available) {
         setPidStatus({ state: "available", msg: "Available" });
       } else {
@@ -557,16 +514,23 @@ export default function CreateCase() {
       return;
     }
 
+    // If user typed a Client ID, require successful verification
     if (!isUpdate && formData.p_id && pidStatus.state !== "available") {
-      setErrors((p) => ({ ...p, p_id: "Please click Verify and ensure the Client ID is available." }));
+      setErrors((p) => ({
+        ...p,
+        p_id: "Please click Verify and ensure the Client ID is available.",
+      }));
       const el = document.getElementById(idFromKey("p_id"));
       if (el) el.focus();
       return;
     }
 
     try {
+      // Build payload to match backend contract
       const payload = {
+        // send p_id if user set one; server will still enforce uniqueness
         p_id: formData.p_id ? String(formData.p_id) : undefined,
+
         patient_name: formData.patient_name,
         patient_phone: formData.patient_phone,
         patient_phone_alt: formData.patient_phone_alt,
@@ -630,6 +594,7 @@ export default function CreateCase() {
             <section className="space-y-4">
               <h2 className="text-xl font-semibold text-gray-800">👤 Client Details</h2>
 
+              {/* Client ID (Create mode) */}
               {!isUpdate && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
@@ -654,9 +619,10 @@ export default function CreateCase() {
                         Verify
                       </button>
                     </div>
-
                     <div className="mt-1 flex items-center gap-2">
-                      {pidStatus.state === "checking" && <span className="text-sm text-gray-600">Checking…</span>}
+                      {pidStatus.state === "checking" && (
+                        <span className="text-sm text-gray-600">Checking…</span>
+                      )}
                       {pidStatus.state === "available" && (
                         <span className="text-xs px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
                           Available
@@ -671,15 +637,16 @@ export default function CreateCase() {
                         <span className="text-xs text-rose-600">{pidStatus.msg}</span>
                       )}
                     </div>
-
                     <p className="text-xs text-gray-500 mt-1">
-                      Client ID is a unique code for this client. Leave blank to auto-generate on the server.
+                      Client ID is a unique code for this client. Leave blank to auto-generate on the
+                      server.
                     </p>
                     <ErrorText msg={errors["p_id"]} />
                   </div>
                 </div>
               )}
 
+              {/* Show Client ID when editing */}
               {isUpdate && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
@@ -696,7 +663,9 @@ export default function CreateCase() {
                       title="Unique Client ID (auto-generated)"
                     />
                   </div>
-                  <div className="text-sm text-gray-600 flex items-end">Client ID is immutable after creation.</div>
+                  <div className="text-sm text-gray-600 flex items-end">
+                    Client ID is immutable after creation.
+                  </div>
                 </div>
               )}
 
@@ -769,7 +738,7 @@ export default function CreateCase() {
                   <ErrorText msg={errors["gender"]} />
                 </div>
 
-                {/* DOB */}
+                {/* D.O.B */}
                 <div>
                   <label className="text-sm text-gray-700 mb-1 block">
                     Date of Birth (D.O.B.) <span className="text-red-600">*</span>
@@ -779,7 +748,7 @@ export default function CreateCase() {
                     type="date"
                     name="dob"
                     value={formData.dob}
-                    onChange={handleDobChange}
+                    onChange={handleChange}
                     className={fieldCls("dob")}
                   />
                   <ErrorText msg={errors["dob"]} />
@@ -794,7 +763,7 @@ export default function CreateCase() {
                     min="0"
                     name="age"
                     value={formData.age}
-                    onChange={handleAgeChange}
+                    onChange={handleChange}
                     placeholder="Age"
                     className={`${baseInputCls} ${normalBorder}`}
                   />
@@ -871,6 +840,7 @@ export default function CreateCase() {
             <section className="space-y-4">
               <h2 className="text-xl font-semibold text-gray-800">📂 Case Information</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Case Type: free-text with suggestions */}
                 <div>
                   <label className="text-sm text-gray-700 mb-1 block">Case Type (free-text or pick)</label>
                   <input
@@ -890,7 +860,6 @@ export default function CreateCase() {
                   </datalist>
                 </div>
               </div>
-
               <div>
                 <label className="text-sm text-gray-700 mb-1 block">Description (optional)</label>
                 <textarea
@@ -905,10 +874,12 @@ export default function CreateCase() {
               </div>
             </section>
 
-            {/* Legacy Text Therapies */}
+            {/* Legacy Text Therapies (optional tags) */}
             <section className="space-y-4">
               <h2 className="text-xl font-semibold text-gray-800">🏷️ Therapy Tags (optional)</h2>
-              <p className="text-sm text-gray-600">Optional free-text tags you used earlier. Safe to ignore now.</p>
+              <p className="text-sm text-gray-600">
+                Optional free-text tags you used earlier. Safe to ignore now.
+              </p>
               <input
                 id={idFromKey("therapies")}
                 type="text"
@@ -917,7 +888,10 @@ export default function CreateCase() {
                 onChange={(e) =>
                   setFormData((p) => ({
                     ...p,
-                    therapies: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                    therapies: e.target.value
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean),
                   }))
                 }
                 placeholder="Comma-separated (e.g., Occupational, Physiotherapy)"
@@ -944,7 +918,6 @@ export default function CreateCase() {
                     <option key={c} value={c} />
                   ))}
                 </datalist>
-
                 <button
                   type="button"
                   className="text-xs px-3 py-2 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50"
@@ -952,7 +925,6 @@ export default function CreateCase() {
                 >
                   Add
                 </button>
-
                 <button
                   type="button"
                   className="text-xs px-3 py-2 rounded border border-gray-300 text-gray-700 hover:bg-gray-50"
@@ -961,7 +933,6 @@ export default function CreateCase() {
                 >
                   Clear all
                 </button>
-
                 <div className="text-xs text-gray-500">
                   Total: <span className="font-medium">{formData.conditions.length}</span>
                 </div>
@@ -1220,6 +1191,7 @@ export default function CreateCase() {
               </div>
             </section>
 
+            {/* Submit */}
             <div className="text-center pt-6">
               <button
                 type="submit"
