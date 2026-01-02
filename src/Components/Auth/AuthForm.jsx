@@ -4,17 +4,36 @@ import useLogin from "./useLogin";
 import { motion } from "framer-motion";
 import { TypeAnimation } from "react-type-animation";
 import { Mail, Lock, Eye, EyeOff } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 
 const AuthForm = () => {
-  const { formData, loading, setFormData, message, handleInput, handleSubmit } =
-    useLogin();
+  const {
+    formData,
+    loading,
+    setFormData,
+    message,
+    handleInput,
+    handleSubmit,
+    handleSsoLogin,
+  } = useLogin();
 
   const [showPassword, setShowPassword] = useState(false);
+  const [searchParams] = useSearchParams();
 
-  // clear form on mount (no URL params, no subrole)
+  // ✅ 1) On mount, clear manual form
   useEffect(() => {
     setFormData({ email: "", password: "" });
   }, [setFormData]);
+
+  // ✅ 2) AUTO SSO LOGIN if ?sso= present
+  useEffect(() => {
+    const sso = searchParams.get("sso");
+    if (!sso) return;
+
+    // auto login attempt
+    handleSsoLogin(sso);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-slate-950">
@@ -57,6 +76,13 @@ const AuthForm = () => {
               />
             </div>
           </div>
+
+          {/* ✅ When SSO present and loading, show auto-login hint */}
+          {loading && searchParams.get("sso") && (
+            <div className="mb-4 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 text-xs text-indigo-100">
+              Auto signing you in… (SSO)
+            </div>
+          )}
 
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-4">
