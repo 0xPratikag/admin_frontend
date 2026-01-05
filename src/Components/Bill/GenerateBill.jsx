@@ -29,11 +29,16 @@ const calcRemaining = (b) => {
 const isBillEditLocked = (b) => {
   if (!b) return false;
   const st = String(b?.payment_status || "").toLowerCase();
-  // ✅ paid / partial -> no edit permission
   if (st === "paid" || st === "partial" || st === "partially_paid") return true;
-  // ✅ safety: remaining 0 means fully paid
   if (calcRemaining(b) <= 0) return true;
   return false;
+};
+
+// --- helpers for plan qty ---
+const toMin1 = (v) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.floor(n));
 };
 
 export default function GenerateBill() {
@@ -79,7 +84,7 @@ export default function GenerateBill() {
   // ------- form state -------
   const [billDate, setBillDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [dueDate, setDueDate] = useState("");
-  const [items, setItems] = useState([]); // ✅ ONLY plan-derived items
+  const [items, setItems] = useState([]); // ✅ ONLY plan-derived items (or existing bill)
   const [taxPercent, setTaxPercent] = useState(0);
   const [discountPercent, setDiscountPercent] = useState(0);
   const [notes, setNotes] = useState("");
@@ -99,7 +104,6 @@ export default function GenerateBill() {
       });
       const list = Array.isArray(data) ? data : [];
       setCases(list);
-      // ✅ after cases fetched, check which have PAID/PARTIAL bills (hide from selection)
       await hydrateCaseLocks(list);
     } catch (e) {
       console.error("Error fetching cases:", e);
@@ -117,10 +121,8 @@ export default function GenerateBill() {
       setLocksLoading(true);
       const next = {};
 
-      // keep existing info (so dropdown doesn't flicker too much)
       for (const [k, v] of Object.entries(caseLockMap || {})) next[k] = v;
 
-      // Only check current list items
       const checks = (list || []).map(async (c) => {
         const id = c?._id;
         if (!id) return;
@@ -139,7 +141,6 @@ export default function GenerateBill() {
           if (e?.response?.status === 404) {
             next[id] = { locked: false, status: "none" };
           } else {
-            // if error, don't lock it by default
             next[id] = next[id] || { locked: false, status: "unknown" };
           }
         }
@@ -165,7 +166,7 @@ export default function GenerateBill() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseSearch]);
 
-  // ensure chosen case appears in dropdown (even if not in current search results)
+  // ensure chosen case appears in dropdown
   useEffect(() => {
     const ensureCasePresent = async () => {
       if (!selectedCaseId) return;
@@ -175,7 +176,6 @@ export default function GenerateBill() {
           const { data } = await api.get(`/view-case/${selectedCaseId}`);
           if (data?._id) {
             setCases((prev) => [data, ...prev.filter((p) => p._id !== data._id)]);
-            // also hydrate lock for this single case
             await hydrateCaseLocks([data]);
           }
         } catch {
@@ -192,7 +192,6 @@ export default function GenerateBill() {
     [cases, selectedCaseId, prefilledCase]
   );
 
-  // ✅ cases shown in dropdown (hide locked paid/partial)
   const selectableCases = useMemo(() => {
     return (cases || []).filter((c) => !caseLockMap?.[c._id]?.locked);
   }, [cases, caseLockMap]);
@@ -250,7 +249,7 @@ export default function GenerateBill() {
       }
     } catch (e) {
       if (e?.response?.status === 404) {
-        setExistingBill(null); // no bill yet
+        setExistingBill(null);
       } else {
         console.error("Error fetching case bill:", e);
       }
@@ -267,19 +266,17 @@ export default function GenerateBill() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCaseId]);
 
-  // ✅ lock editing for paid/partial bills
   const billEditLocked = useMemo(() => isBillEditLocked(existingBill), [existingBill]);
 
-  // ------- items helpers (edit only) -------
-  const updateItem = (idx, key, value) => {
-    setItems((prev) => {
-      const next = [...prev];
-      next[idx] = { ...next[idx], [key]: value };
-      return next;
-    });
-  };
-
   // ------- derive line-items from therapy_plan snapshot -------
+  /**
+   * ✅ Billing rules:
+   * - Always show TOTAL SESSIONS as quantity.
+   * - If per-session: quantity = sessions_count, rate = price_per_session.
+   * - If per-package: totalSessions = packages_count * default_sessions_per_package
+   *   and rate = (price_per_package / default_sessions_per_package)  -> so amount = packages_count * price_per_package.
+   * - Tests: qty = 1, rate = price_per_test.
+   */
   const buildItemsFromPlan = (planBlocks) => {
     const out = [];
     if (!Array.isArray(planBlocks)) return out;
@@ -289,34 +286,44 @@ export default function GenerateBill() {
       const subs = Array.isArray(blk?.subTherapy) ? blk.subTherapy : [];
       const tests = Array.isArray(blk?.tests) ? blk.tests : [];
 
-      // Sub-therapies
       for (const s of subs) {
         const sName = s?.name || "Sub-therapy";
-        const hasPerSession = !!s?.flags?.pricePerSession;
-        const hasPerPackage = !!s?.flags?.pricePerPackage;
+        const perSession = !!s?.flags?.pricePerSession;
+        const perPackage = !!s?.flags?.pricePerPackage;
 
-        if (hasPerSession) {
+        const pricePerSession = Number(s?.price_per_session || 0);
+        const pricePerPackage = Number(s?.price_per_package || 0);
+
+        const sessionsPerPackage = toMin1(s?.default_sessions_per_package || 1);
+        const sessionsCount = toMin1(s?.sessions_count || 1);
+        const packagesCount = toMin1(s?.packages_count || 1);
+
+        if (perSession) {
           out.push({
-            description: `${tName} • ${sName} (per session)`,
-            quantity: 1,
-            rate: Number(s?.price_per_session || 0),
+            description: `${tName} • ${sName} (Per Session ✓)`,
+            quantity: sessionsCount,
+            rate: pricePerSession,
           });
-        }
-        if (hasPerPackage) {
+        } else if (perPackage) {
+          const totalSessions = packagesCount * sessionsPerPackage;
+          const effectiveRate =
+            sessionsPerPackage > 0
+              ? pricePerPackage / sessionsPerPackage
+              : pricePerPackage;
+
           out.push({
-            description: `${tName} • ${sName} (package)`,
-            quantity: 1,
-            rate: Number(s?.price_per_package || 0),
+            description: `${tName} • ${sName} (Per Package ✓ — ${packagesCount} pkg × ${sessionsPerPackage} sess)`,
+            quantity: totalSessions,
+            rate: Number.isFinite(effectiveRate) ? effectiveRate : 0,
           });
         }
       }
 
-      // Tests
       if (blk?.therapyTestsEnabled) {
         for (const tt of tests) {
           const testName = tt?.name || "Test";
           out.push({
-            description: `${tName} • ${testName} (test)`,
+            description: `${tName} • ${testName} (Test)`,
             quantity: 1,
             rate: Number(tt?.price_per_test || 0),
           });
@@ -330,8 +337,7 @@ export default function GenerateBill() {
   // ✅ AUTO fill items from plan when case selected (only if no existing bill)
   useEffect(() => {
     if (!caseDetail?.therapy_plan?.length) return;
-    if (existingBill) return; // existing bill ko override mat karo
-
+    if (existingBill) return;
     const derived = buildItemsFromPlan(caseDetail.therapy_plan);
     setItems(derived);
   }, [caseDetail, existingBill]);
@@ -361,7 +367,7 @@ export default function GenerateBill() {
     [subtotal, taxAmount, discountAmount]
   );
 
-  // ------- submit -> PUT /cases/:caseId/bill -------
+  // ------- submit -------
   const submitBill = async () => {
     setErrorMsg("");
 
@@ -426,10 +432,11 @@ export default function GenerateBill() {
     }
   };
 
-  // ------- UI -------
+  // ------- UI (Plan Snapshot) -------
   const PlanBlock = ({ blk }) => {
     const subs = Array.isArray(blk?.subTherapy) ? blk.subTherapy : [];
     const tests = Array.isArray(blk?.tests) ? blk.tests : [];
+
     return (
       <div className="border rounded-lg p-4 bg-white shadow-sm border-indigo-100">
         <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -443,6 +450,7 @@ export default function GenerateBill() {
           </div>
         </div>
 
+        {/* Sub-therapies snapshot */}
         <div className="mt-3">
           <p className="text-xs uppercase tracking-wide text-gray-500">Sub-Therapies</p>
           <div className="mt-2 overflow-x-auto">
@@ -451,64 +459,109 @@ export default function GenerateBill() {
                 <tr className="text-left text-gray-600 border-b">
                   <th className="py-2 pr-4">Name</th>
                   <th className="py-2 pr-4">Duration</th>
-                  <th className="py-2 pr-4">Price / Session</th>
-                  <th className="py-2 pr-4">Price / Package</th>
-                  <th className="py-2 pr-4">Per Session?</th>
-                  <th className="py-2 pr-4">Per Package?</th>
+                  <th className="py-2 pr-4">Per Session ✓</th>
+                  <th className="py-2 pr-4">Per Package ✓</th>
+
+                  {/* ✅ NEW: show package count before total sessions */}
+                  <th className="py-2 pr-4">Package Count</th>
+
+                  <th className="py-2 pr-4">Total Sessions</th>
+                  <th className="py-2 pr-4">Rate Used (per session)</th>
                 </tr>
               </thead>
+
               <tbody>
                 {subs.length ? (
                   subs.map((s, i) => {
-                    const perPkg = !!s?.flags?.pricePerPackage;
+                    const perSession = !!s?.flags?.pricePerSession;
+                    const perPackage = !!s?.flags?.pricePerPackage;
+
+                    const sessionsPerPackage = toMin1(s?.default_sessions_per_package || 1);
+                    const sessionsCount = toMin1(s?.sessions_count || 1);
+                    const packagesCount = toMin1(s?.packages_count || 1);
+
+                    const totalSessions = perSession
+                      ? sessionsCount
+                      : perPackage
+                      ? packagesCount * sessionsPerPackage
+                      : 0;
+
+                    const rateUsed = perSession
+                      ? Number(s?.price_per_session || 0)
+                      : perPackage
+                      ? Number(s?.price_per_package || 0) / sessionsPerPackage
+                      : 0;
+
                     return (
-                      <tr
-                        key={`${s?.subTherapyId || i}`}
-                        className="border-b last:border-b-0"
-                      >
+                      <tr key={`${s?.subTherapyId || i}`} className="border-b last:border-b-0">
                         <td className="py-2 pr-4">{s?.name || "—"}</td>
                         <td className="py-2 pr-4">{fmtMins(s?.duration_mins)}</td>
-                        <td className="py-2 pr-4">{inr(s?.price_per_session)}</td>
+
                         <td className="py-2 pr-4">
-                          {perPkg ? inr(s?.price_per_package) : "N/A"}
-                        </td>
-                        <td className="py-2 pr-4">
-                          {s?.flags?.pricePerSession ? (
-                            <span className="text-xs px-2 py-1 rounded bg-green-50 text-green-700">
-                              Yes
+                          {perSession ? (
+                            <span className="text-xs px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              ✓
                             </span>
                           ) : (
-                            <span className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700">
-                              No
+                            <span className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700 border border-gray-200">
+                              —
                             </span>
                           )}
                         </td>
+
                         <td className="py-2 pr-4">
-                          {perPkg ? (
-                            <span className="text-xs px-2 py-1 rounded bg-green-50 text-green-700">
-                              Yes
+                          {perPackage ? (
+                            <span className="text-xs px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              ✓
                             </span>
                           ) : (
-                            <span className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700">
-                              No
+                            <span className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700 border border-gray-200">
+                              —
                             </span>
                           )}
                         </td>
+
+                        {/* ✅ NEW: package count cell */}
+                        <td className="py-2 pr-4">
+                          {perPackage ? (
+                            <span className="font-semibold">{packagesCount}</span>
+                          ) : (
+                            <span className="text-gray-500">—</span>
+                          )}
+                        </td>
+
+                        <td className="py-2 pr-4">
+                          {totalSessions ? (
+                            <span className="font-semibold">{totalSessions}</span>
+                          ) : (
+                            <span className="text-gray-500">—</span>
+                          )}
+                        </td>
+
+                        <td className="py-2 pr-4">{inr(rateUsed)}</td>
                       </tr>
                     );
                   })
                 ) : (
                   <tr>
-                    <td className="py-3 text-gray-500" colSpan={6}>
+                    <td className="py-3 text-gray-500" colSpan={7}>
                       No sub-therapies selected.
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
+
+            {!!subs.length && (
+              <div className="mt-2 text-xs text-gray-500">
+                Note: For <b>Per Package</b>, total sessions = (packages_count × sessions_per_package) and rate used is
+                (package_price ÷ sessions_per_package) so total amount remains correct.
+              </div>
+            )}
           </div>
         </div>
 
+        {/* Tests snapshot */}
         <div className="mt-5">
           <div className="flex items-center gap-2">
             <p className="text-xs uppercase tracking-wide text-gray-500">Tests</p>
@@ -522,6 +575,7 @@ export default function GenerateBill() {
               {blk?.therapyTestsEnabled ? "Enabled" : "Disabled"}
             </span>
           </div>
+
           {blk?.therapyTestsEnabled ? (
             <div className="mt-2 overflow-x-auto">
               <table className="min-w-full text-sm">
@@ -535,10 +589,7 @@ export default function GenerateBill() {
                 <tbody>
                   {tests.length ? (
                     tests.map((t, i) => (
-                      <tr
-                        key={`${t?.testId || i}`}
-                        className="border-b last:border-b-0"
-                      >
+                      <tr key={`${t?.testId || i}`} className="border-b last:border-b-0">
                         <td className="py-2 pr-4">{t?.name || "—"}</td>
                         <td className="py-2 pr-4">{fmtMins(t?.duration_mins)}</td>
                         <td className="py-2 pr-4">{inr(t?.price_per_test)}</td>
@@ -555,7 +606,9 @@ export default function GenerateBill() {
               </table>
             </div>
           ) : (
-            <div className="text-sm text-gray-500 mt-1">Tests not enabled for this therapy.</div>
+            <div className="text-sm text-gray-500 mt-1">
+              Tests not enabled for this therapy.
+            </div>
           )}
         </div>
       </div>
@@ -617,7 +670,7 @@ export default function GenerateBill() {
               type="text"
               value={caseSearch}
               onChange={(e) => setCaseSearch(e.target.value)}
-              placeholder="Search by name, phone, or type..."
+              placeholder="Search by name, phone..."
               className="w-full mb-2 rounded-md border p-2"
             />
 
@@ -631,7 +684,6 @@ export default function GenerateBill() {
                 {casesLoading ? "Loading cases..." : "Choose a case"}
               </option>
 
-              {/* If a locked case is opened directly via URL, show it but disabled */}
               {selectedCaseId && caseLockMap?.[selectedCaseId]?.locked && (
                 <option value={selectedCaseId} disabled>
                   (Locked: Paid/Partial) • {selectedCaseBrief?.patient_name || "Selected Case"}
@@ -653,7 +705,7 @@ export default function GenerateBill() {
             </div>
 
             <div className="mt-2 text-xs text-gray-500">
-              Items are auto-generated from this case&apos;s Therapy Plan snapshot.
+              Items auto-generate from Therapy Plan snapshot (Total Sessions based).
             </div>
 
             {selectedCaseId && (
@@ -682,6 +734,7 @@ export default function GenerateBill() {
                 disabled={disableAllEdits}
               />
             </div>
+
             <div className="flex flex-col">
               <label className="text-sm text-gray-600 mb-1">Due Date (optional)</label>
               <input
@@ -740,96 +793,14 @@ export default function GenerateBill() {
 
               {existingBill && (
                 <p className="text-xs text-amber-700 mt-2">
-                  Note: If payments already exist on this bill, the server will block lowering the
-                  total below the amount already paid.
+                  Note: If payments already exist on this bill, the server can block lowering the total below amount paid.
                 </p>
               )}
             </div>
           </div>
         </div>
 
-        {/* ======= Generated Bill Items (editable qty/rate) ======= */}
-        {/* <div className="mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-lg font-semibold text-gray-800">
-              Bill Items (from Therapy Plan)
-            </h3>
-            <span className="text-xs text-gray-500">
-              Qty/Rate editable • No manual add/remove
-            </span>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-600 border-b">
-                  <th className="py-2 pr-3">Description</th>
-                  <th className="py-2 pr-3">Qty</th>
-                  <th className="py-2 pr-3">Rate (₹)</th>
-                  <th className="py-2 pr-3">Amount (₹)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((it, idx) => {
-                  const amount = (Number(it.quantity) || 0) * (Number(it.rate) || 0);
-                  return (
-                    <tr key={idx} className="border-b last:border-b-0">
-                      <td className="py-2 pr-3">
-                        <input
-                          type="text"
-                          value={it.description}
-                          onChange={(e) => updateItem(idx, "description", e.target.value)}
-                          className="w-full rounded-md border p-2"
-                          disabled={disableAllEdits}
-                        />
-                      </td>
-
-                      <td className="py-2 pr-3">
-                        <input
-                          type="number"
-                          min="1"
-                          step="1"
-                          value={it.quantity}
-                          onChange={(e) => updateItem(idx, "quantity", e.target.value)}
-                          className="w-24 rounded-md border p-2"
-                          disabled={disableAllEdits}
-                        />
-                      </td>
-
-                      <td className="py-2 pr-3">
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={it.rate}
-                          onChange={(e) => updateItem(idx, "rate", e.target.value)}
-                          className="w-28 rounded-md border p-2"
-                          disabled={disableAllEdits}
-                        />
-                      </td>
-
-                      <td className="py-2 pr-3">
-                        <div className="w-28 rounded-md border p-2 bg-gray-50">
-                          {amount.toFixed(2)}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {items.length === 0 && (
-                  <tr>
-                    <td className="py-3 text-gray-500" colSpan={4}>
-                      No items found from plan. Please check the case plan selections.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div> */}
-
-        {/* ======= Plan Snapshot (read-only helper) ======= */}
+        {/* Plan Snapshot */}
         <div className="mb-6">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold text-indigo-800">Therapy Plan Snapshot</h3>
@@ -879,6 +850,7 @@ export default function GenerateBill() {
           >
             ← Back
           </button>
+
           <button
             type="button"
             disabled={saving || billLoading || disableAllEdits}

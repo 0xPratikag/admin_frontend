@@ -79,6 +79,9 @@ const downloadInvoice = () => {
   handleDownloadFinalInvoiceByBill(id, { preview: false });
 };
 
+const n0 = (v) => Number(v || 0);
+
+
 
   if (loading) return <div className="p-6">Loading...</div>;
   if (error) {
@@ -174,33 +177,75 @@ const downloadInvoice = () => {
         <div className="mb-8">
           <h2 className="text-lg font-semibold text-slate-800 mb-3">Line Items</h2>
           <div className="overflow-x-auto border rounded-xl">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-slate-50 border-b text-slate-700">
-                  <th className="p-3 text-left">#</th>
-                  <th className="p-3 text-left">Description</th>
-                  <th className="p-3 text-right">Qty</th>
-                  <th className="p-3 text-right">Rate</th>
-                  <th className="p-3 text-right">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((it, idx) => (
-                  <tr key={idx} className="border-t">
-                    <td className="p-3">{idx + 1}</td>
-                    <td className="p-3">{it.description}</td>
-                    <td className="p-3 text-right">{it.quantity}</td>
-                    <td className="p-3 text-right">{fmtINR(it.rate)}</td>
-                    <td className="p-3 text-right">{fmtINR(it.amount)}</td>
-                  </tr>
-                ))}
-                {items.length === 0 && (
-                  <tr>
-                    <td className="p-3 text-slate-500" colSpan={5}>No items found.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+
+<table className="w-full text-sm">
+  <thead>
+    <tr className="bg-slate-50 border-b text-slate-700">
+      <th className="p-3 text-left">#</th>
+      <th className="p-3 text-left">Description</th>
+
+      <th className="p-3 text-left hidden sm:table-cell">Unit</th>
+      <th className="p-3 text-right hidden sm:table-cell">Qty</th>
+
+      <th className="p-3 text-right">Total Sessions</th>
+      <th className="p-3 text-right hidden md:table-cell">Rate</th>
+
+      <th className="p-3 text-right hidden md:table-cell">Discount</th>
+      <th className="p-3 text-right">Net Amount</th>
+    </tr>
+  </thead>
+
+  <tbody>
+    {items.map((it, idx) => {
+      const sessions = n0(it.total_sessions); // ✅ correct
+      const qty = n0(it.quantity);
+
+      const gross = n0(it.amount); // server ka gross
+      const discPct = n0(it.item_discount_percent);
+      const discAmt = n0(it.item_discount_amount);
+
+      const net = Math.max(0, gross - discAmt);
+
+      return (
+        <tr key={it._id || idx} className="border-t">
+          <td className="p-3">{idx + 1}</td>
+
+          <td className="p-3">
+            <div className="font-medium text-slate-800">{it.description || "—"}</div>
+            <div className="text-xs text-slate-500">
+              {it.kind ? `Kind: ${it.kind}` : null}
+              {it.tax_inclusive ? " • Tax Inclusive" : " • Tax Exclusive"}
+            </div>
+          </td>
+
+          <td className="p-3 hidden sm:table-cell">{it.unit || "—"}</td>
+          <td className="p-3 text-right hidden sm:table-cell">{qty || "—"}</td>
+
+          <td className="p-3 text-right">{sessions || "—"}</td>
+          <td className="p-3 text-right hidden md:table-cell">{fmtINR(it.rate)}</td>
+
+          <td className="p-3 text-right hidden md:table-cell">
+            <div className="text-slate-700">{discPct ? `${discPct}%` : "—"}</div>
+            <div className="text-xs text-slate-500">
+              {discAmt ? `- ${fmtINR(discAmt)}` : ""}
+            </div>
+          </td>
+
+          <td className="p-3 text-right font-semibold">{fmtINR(net)}</td>
+        </tr>
+      );
+    })}
+
+    {items.length === 0 && (
+      <tr>
+        <td className="p-3 text-slate-500" colSpan={8}>
+          No items found.
+        </td>
+      </tr>
+    )}
+  </tbody>
+</table>
+
           </div>
         </div>
 

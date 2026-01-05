@@ -2,6 +2,11 @@ import React, { useEffect, useState, useMemo, useCallback, useRef } from "react"
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 
+// ✅ 3rd party tooltip (fixes hover css + overflow clipping)
+import Tippy from "@tippyjs/react";
+import "tippy.js/dist/tippy.css";
+import "tippy.js/themes/light-border.css";
+
 // (suggestions only)
 const caseTypeOptions = ["Ortho", "Neuro", "General", "Cardio", "Pediatrics", "ENT", "Dental"];
 const conditionOptions = ["Diabetes", "Hypertension", "Asthma", "Arthritis"];
@@ -92,7 +97,25 @@ export default function CreateCase() {
     },
   });
 
-  // Therapy plan (unchanged)
+  /**
+   * Therapy plan payload format (frontend) — includes quantities:
+   * therapyPlan: [
+   *  {
+   *    therapyId,
+   *    subTherapy: [
+   *      {
+   *        subTherapyId,
+   *        pricePerSession: boolean,   // for current backend compatibility
+   *        pricePerPackage: boolean,   // for current backend compatibility
+   *        sessions_count?: number,    // NEW
+   *        packages_count?: number,    // NEW
+   *      }
+   *    ],
+   *    therapyTestsEnabled,
+   *    tests: [{ testId }]
+   *  }
+   * ]
+   */
   const [therapyPlan, setTherapyPlan] = useState([]);
   const [therapyList, setTherapyList] = useState([]);
   const [therapyLoading, setTherapyLoading] = useState(false);
@@ -189,11 +212,32 @@ export default function CreateCase() {
           ? c.therapy_plan.map((t) => ({
               therapyId: String(t.therapyId),
               subTherapy: Array.isArray(t.subTherapy)
-                ? t.subTherapy.map((s) => ({
-                    subTherapyId: String(s.subTherapyId),
-                    pricePerSession: !!s?.flags?.pricePerSession,
-                    pricePerPackage: !!s?.flags?.pricePerPackage,
-                  }))
+                ? t.subTherapy.map((s) => {
+                    const pricePerSession = !!s?.flags?.pricePerSession;
+                    const pricePerPackage = !!s?.flags?.pricePerPackage;
+
+                    const sessions_count =
+                      Number.isFinite(Number(s?.sessions_count)) && Number(s?.sessions_count) > 0
+                        ? Number(s?.sessions_count)
+                        : pricePerSession
+                        ? 1
+                        : undefined;
+
+                    const packages_count =
+                      Number.isFinite(Number(s?.packages_count)) && Number(s?.packages_count) > 0
+                        ? Number(s?.packages_count)
+                        : pricePerPackage
+                        ? 1
+                        : undefined;
+
+                    return {
+                      subTherapyId: String(s.subTherapyId),
+                      pricePerSession,
+                      pricePerPackage,
+                      sessions_count,
+                      packages_count,
+                    };
+                  })
                 : [],
               therapyTestsEnabled: !!t.therapyTestsEnabled,
               tests: Array.isArray(t.tests) ? t.tests.map((x) => ({ testId: String(x.testId) })) : [],
@@ -359,7 +403,6 @@ export default function CreateCase() {
     const age = e.target.value;
     lastEditedRef.current = "age";
     setFormData((p) => {
-      // user cleared age → don't force dob
       if (age === "" || age == null) return { ...p, age };
       const nextDob = calcDobFromAge(age);
       return { ...p, age, dob: nextDob || p.dob };
@@ -369,21 +412,10 @@ export default function CreateCase() {
 
   // If case is loaded (update mode), ensure sync if only one exists
   useEffect(() => {
-    // keep as a soft sync without looping
     setFormData((p) => {
-      // if both present, do nothing
       if (p.dob && p.age !== "" && p.age != null) return p;
-
-      // if dob present but age missing -> fill age
-      if (p.dob && (p.age === "" || p.age == null)) {
-        return { ...p, age: calcAgeFromDob(p.dob) };
-      }
-
-      // if age present but dob missing -> fill dob
-      if (!p.dob && p.age !== "" && p.age != null) {
-        return { ...p, dob: calcDobFromAge(p.age) };
-      }
-
+      if (p.dob && (p.age === "" || p.age == null)) return { ...p, age: calcAgeFromDob(p.dob) };
+      if (!p.dob && p.age !== "" && p.age != null) return { ...p, dob: calcDobFromAge(p.age) };
       return p;
     });
   }, [isUpdate, loading]);
@@ -446,28 +478,68 @@ export default function CreateCase() {
     });
   };
 
-  const toggleSubTherapyFlag = (therapyId, subTherapyId, flagKey) => {
+  // ✅ Mutual exclusive: perSession OR perPackage (checkboxes)
+  const setSubTherapyBilling = (therapyId, subTherapyId, mode, checked) => {
+    const tid = String(therapyId);
+    const sid = String(subTherapyId);
+
+    setTherapyPlan((prev) =>
+      prev.map((blk) => {
+        if (String(blk.therapyId) !== tid) return blk;
+
+        const exists = blk.subTherapy.find((s) => String(s.subTherapyId) === sid);
+
+        if (!checked) {
+          return { ...blk, subTherapy: blk.subTherapy.filter((s) => String(s.subTherapyId) !== sid) };
+        }
+
+        const next = {
+          subTherapyId: sid,
+          pricePerSession: mode === "session",
+          pricePerPackage: mode === "package",
+          sessions_count: mode === "session" ? Math.max(1, Number(exists?.sessions_count || 1)) : undefined,
+          packages_count: mode === "package" ? Math.max(1, Number(exists?.packages_count || 1)) : undefined,
+        };
+
+        if (!exists) return { ...blk, subTherapy: [...blk.subTherapy, next] };
+
+        return {
+          ...blk,
+          subTherapy: blk.subTherapy.map((s) => (String(s.subTherapyId) === sid ? next : s)),
+        };
+      })
+    );
+  };
+
+  const setSubTherapyQty = (therapyId, subTherapyId, field, rawVal) => {
+    const tid = String(therapyId);
+    const sid = String(subTherapyId);
+    const n = Math.max(1, Number(rawVal || 1) || 1);
+
+    setTherapyPlan((prev) =>
+      prev.map((blk) => {
+        if (String(blk.therapyId) !== tid) return blk;
+        const exists = blk.subTherapy.find((s) => String(s.subTherapyId) === sid);
+        if (!exists) return blk;
+
+        if (field === "sessions_count" && !exists.pricePerSession) return blk;
+        if (field === "packages_count" && !exists.pricePerPackage) return blk;
+
+        return {
+          ...blk,
+          subTherapy: blk.subTherapy.map((s) => (String(s.subTherapyId) === sid ? { ...s, [field]: n } : s)),
+        };
+      })
+    );
+  };
+
+  const clearSubTherapySelection = (therapyId, subTherapyId) => {
     const tid = String(therapyId);
     const sid = String(subTherapyId);
     setTherapyPlan((prev) =>
       prev.map((blk) => {
         if (String(blk.therapyId) !== tid) return blk;
-        const existing = blk.subTherapy.find((s) => String(s.subTherapyId) === sid);
-        if (existing) {
-          const nextVal = !existing[flagKey];
-          const updated = { ...existing, [flagKey]: nextVal };
-          if (!updated.pricePerSession && !updated.pricePerPackage) {
-            return { ...blk, subTherapy: blk.subTherapy.filter((s) => String(s.subTherapyId) !== sid) };
-          }
-          return { ...blk, subTherapy: blk.subTherapy.map((s) => (String(s.subTherapyId) === sid ? updated : s)) };
-        }
-        return {
-          ...blk,
-          subTherapy: [
-            ...blk.subTherapy,
-            { subTherapyId: sid, pricePerSession: flagKey === "pricePerSession", pricePerPackage: flagKey === "pricePerPackage" },
-          ],
-        };
+        return { ...blk, subTherapy: blk.subTherapy.filter((s) => String(s.subTherapyId) !== sid) };
       })
     );
   };
@@ -476,7 +548,9 @@ export default function CreateCase() {
     const tid = String(therapyId);
     loadCatalogForTherapy(tid);
     setTherapyPlan((prev) =>
-      prev.map((blk) => (String(blk.therapyId) === tid ? { ...blk, therapyTestsEnabled: !blk.therapyTestsEnabled } : blk))
+      prev.map((blk) =>
+        String(blk.therapyId) === tid ? { ...blk, therapyTestsEnabled: !blk.therapyTestsEnabled } : blk
+      )
     );
   };
 
@@ -487,7 +561,9 @@ export default function CreateCase() {
       prev.map((blk) => {
         if (String(blk.therapyId) !== tid) return blk;
         const exists = blk.tests.find((t) => String(t.testId) === xid);
-        return exists ? { ...blk, tests: blk.tests.filter((t) => String(t.testId) !== xid) } : { ...blk, tests: [...blk.tests, { testId: xid }] };
+        return exists
+          ? { ...blk, tests: blk.tests.filter((t) => String(t.testId) !== xid) }
+          : { ...blk, tests: [...blk.tests, { testId: xid }] };
       })
     );
   };
@@ -581,7 +657,16 @@ export default function CreateCase() {
         therapies: formData.therapies || [],
         conditions: formData.conditions || [],
         other_details: formData.other_details || {},
-        therapy_plan: therapyPlan,
+        therapy_plan: therapyPlan.map((t) => ({
+          ...t,
+          subTherapy: (t.subTherapy || []).map((s) => ({
+            subTherapyId: s.subTherapyId,
+            pricePerSession: !!s.pricePerSession,
+            pricePerPackage: !!s.pricePerPackage,
+            sessions_count: s.pricePerSession ? Math.max(1, Number(s.sessions_count || 1)) : undefined,
+            packages_count: s.pricePerPackage ? Math.max(1, Number(s.packages_count || 1)) : undefined,
+          })),
+        })),
       };
 
       if (isUpdate) {
@@ -956,7 +1041,7 @@ export default function CreateCase() {
                 <button
                   type="button"
                   className="text-xs px-3 py-2 rounded border border-gray-300 text-gray-700 hover:bg-gray-50"
-                  onClick={clearAllConditions}
+                  onClick={() => setFormData((p) => ({ ...p, conditions: [] }))}
                   disabled={!formData.conditions.length}
                 >
                   Clear all
@@ -989,12 +1074,12 @@ export default function CreateCase() {
               )}
             </section>
 
-            {/* Therapy Plan Builder (unchanged core) */}
+            {/* Therapy Plan Builder */}
             <section className="space-y-4">
               <h2 className="text-xl font-semibold text-gray-800">🩺 Therapy Plan (builder)</h2>
               <p className="text-sm text-gray-600">
-                Add therapies, tick sub-therapy billing flags, and choose tests. This will be stored as a snapshot
-                in the case (<code>therapy_plan</code>).
+                Add therapies, select <b>either</b> Per Session or Per Package for each sub-therapy, and provide quantity.
+                Click/hover “View” to see pricing.
               </p>
 
               {/* Add Therapy Row */}
@@ -1031,22 +1116,15 @@ export default function CreateCase() {
                   const cat = catalogs[tid] || { subtherapies: [], tests: [] };
                   const isCatLoading = !!catalogLoading[tid];
 
-                  const testNameById = Object.fromEntries(
-                    (cat.tests || []).map((t) => [String(t._id), t.name])
-                  );
-
+                  const testNameById = Object.fromEntries((cat.tests || []).map((t) => [String(t._id), t.name]));
                   const search = (testSearch[tid] || "").toLowerCase();
-                  const filteredTests = (cat.tests || []).filter((t) =>
-                    t.name?.toLowerCase().includes(search)
-                  );
+                  const filteredTests = (cat.tests || []).filter((t) => t.name?.toLowerCase().includes(search));
 
                   return (
                     <div key={`${tid}-${idx}`} className="border rounded-lg p-4">
                       {/* Header */}
                       <div className="flex items-center justify-between gap-3 flex-wrap">
-                        <div className="font-semibold text-indigo-700">
-                          {therapyNameById[tid] || "Therapy"}
-                        </div>
+                        <div className="font-semibold text-indigo-700">{therapyNameById[tid] || "Therapy"}</div>
                         <div className="flex items-center gap-3">
                           <button
                             type="button"
@@ -1073,47 +1151,177 @@ export default function CreateCase() {
                             <tr className="text-left text-gray-600 border-b">
                               <th className="py-2 pr-4">Sub-Therapy</th>
                               <th className="py-2 pr-4">Per Session</th>
+                              <th className="py-2 pr-4">Sessions Qty</th>
                               <th className="py-2 pr-4">Per Package</th>
+                              <th className="py-2 pr-4">Packages Qty</th>
+                              <th className="py-2 pr-4">Details</th>
+                              <th className="py-2 pr-4">Clear</th>
                             </tr>
                           </thead>
                           <tbody>
                             {cat.subtherapies.map((s) => {
                               const sid = String(s._id);
                               const existing = blk.subTherapy.find((x) => String(x.subTherapyId) === sid);
+
                               const perSession = !!existing?.pricePerSession;
                               const perPackage = !!existing?.pricePerPackage;
+
+                              const sessionsCount = perSession ? Number(existing?.sessions_count || 1) : 1;
+                              const packagesCount = perPackage ? Number(existing?.packages_count || 1) : 1;
+
+                              // ✅ adapt to whatever keys backend sends (safe fallbacks)
+                              const pricePerSessionVal = Number(s?.price_per_session ?? s?.pricePerSession ?? 0);
+                              const pricePerPackageVal = Number(s?.price_per_package ?? s?.pricePerPackage ?? 0);
+                              const defaultSessionsPerPackage = Number(
+                                s?.default_sessions_per_package ?? s?.sessions_per_package ?? 1
+                              );
+                              const durationMins = s?.duration_mins ?? s?.duration ?? null;
+
+                              const tooltipContent = (
+                                <div className="w-[280px]">
+                                  <div className="text-sm font-semibold text-gray-900 mb-2">
+                                    {s.name} — Pricing
+                                  </div>
+                                  <div className="text-xs text-gray-700 space-y-1">
+                                    <div className="flex justify-between gap-3">
+                                      <span>Per Session</span>
+                                      <span className="font-medium">₹ {pricePerSessionVal}</span>
+                                    </div>
+                                    <div className="flex justify-between gap-3">
+                                      <span>Per Package</span>
+                                      <span className="font-medium">₹ {pricePerPackageVal}</span>
+                                    </div>
+                                    <div className="flex justify-between gap-3">
+                                      <span>Sessions / Package</span>
+                                      <span className="font-medium">{defaultSessionsPerPackage}</span>
+                                    </div>
+                                    {!!durationMins && (
+                                      <div className="flex justify-between gap-3">
+                                        <span>Duration</span>
+                                        <span className="font-medium">{durationMins} mins</span>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="mt-2 text-[11px] text-gray-500">
+                                    Tip: Tick only one (Per Session or Per Package). Quantity input will appear accordingly.
+                                  </div>
+                                </div>
+                              );
+
                               return (
                                 <tr key={sid} className="border-b last:border-b-0">
-                                  <td className="py-2 pr-4">{s.name}</td>
+                                  <td className="py-2 pr-4">
+                                    <div className="font-medium text-gray-900">{s.name}</div>
+                                    {!!durationMins && (
+                                      <div className="text-xs text-gray-500">Duration: {durationMins} mins</div>
+                                    )}
+                                  </td>
+
                                   <td className="py-2 pr-4">
                                     <input
                                       type="checkbox"
                                       checked={perSession}
-                                      onChange={() => toggleSubTherapyFlag(tid, sid, "pricePerSession")}
+                                      onChange={(e) => setSubTherapyBilling(tid, sid, "session", e.target.checked)}
+                                      title="Choose Per Session"
                                     />
                                   </td>
+
+                                  <td className="py-2 pr-4">
+                                    {perSession ? (
+                                      <input
+                                        type="number"
+                                        min={1}
+                                        value={sessionsCount}
+                                        onChange={(e) => setSubTherapyQty(tid, sid, "sessions_count", e.target.value)}
+                                        className="border rounded px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                        placeholder="Sessions"
+                                      />
+                                    ) : (
+                                      <span className="text-xs text-gray-400">—</span>
+                                    )}
+                                  </td>
+
                                   <td className="py-2 pr-4">
                                     <input
                                       type="checkbox"
                                       checked={perPackage}
-                                      onChange={() => toggleSubTherapyFlag(tid, sid, "pricePerPackage")}
+                                      onChange={(e) => setSubTherapyBilling(tid, sid, "package", e.target.checked)}
+                                      title="Choose Per Package"
                                     />
+                                  </td>
+
+                                  <td className="py-2 pr-4">
+                                    {perPackage ? (
+                                      <input
+                                        type="number"
+                                        min={1}
+                                        value={packagesCount}
+                                        onChange={(e) => setSubTherapyQty(tid, sid, "packages_count", e.target.value)}
+                                        className="border rounded px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                        placeholder="Packages"
+                                      />
+                                    ) : (
+                                      <span className="text-xs text-gray-400">—</span>
+                                    )}
+                                  </td>
+
+                                  {/* ✅ FIXED tooltip: rendered in body (no overflow clipping) */}
+                                  <td className="py-2 pr-4">
+                                    <Tippy
+                                      content={tooltipContent}
+                                      theme="light-border"
+                                      placement="right"
+                                      interactive
+                                      appendTo={() => document.body}
+                                      maxWidth={320}
+                                      delay={[80, 0]}
+                                    >
+                                      <button
+                                        type="button"
+                                        className="text-xs px-2 py-1 rounded border border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                                      >
+                                        View
+                                      </button>
+                                    </Tippy>
+                                  </td>
+
+                                  <td className="py-2 pr-4">
+                                    {(perSession || perPackage) ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => clearSubTherapySelection(tid, sid)}
+                                        className="text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50"
+                                        title="Clear selection"
+                                      >
+                                        Clear
+                                      </button>
+                                    ) : (
+                                      <span className="text-xs text-gray-400">—</span>
+                                    )}
                                   </td>
                                 </tr>
                               );
                             })}
+
                             {!cat.subtherapies.length && (
                               <tr>
-                                <td className="py-2 text-gray-500" colSpan={3}>
+                                <td className="py-2 text-gray-500" colSpan={7}>
                                   {isCatLoading ? "Loading sub-therapies…" : "No sub-therapies configured."}
                                 </td>
                               </tr>
                             )}
                           </tbody>
                         </table>
+
+                        {!!cat.subtherapies.length && (
+                          <div className="mt-2 text-xs text-gray-500">
+                            Note: Selecting <b>Per Session</b> will automatically unselect <b>Per Package</b> (and vice versa).
+                          </div>
+                        )}
                       </div>
 
-                      {/* Tests toggle + list */}
+                      {/* Tests */}
                       <div className="mt-6">
                         <label className="inline-flex items-center gap-2">
                           <input
@@ -1126,15 +1334,12 @@ export default function CreateCase() {
 
                         {blk.therapyTestsEnabled && (
                           <div className="mt-3 space-y-3">
-                            {/* Actions row */}
                             <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
                               <input
                                 type="text"
                                 placeholder="Search tests…"
                                 value={testSearch[tid] || ""}
-                                onChange={(e) =>
-                                  setTestSearch((s) => ({ ...s, [tid]: e.target.value }))
-                                }
+                                onChange={(e) => setTestSearch((s) => ({ ...s, [tid]: e.target.value }))}
                                 className={`${baseInputCls} ${normalBorder} min-w-[220px]`}
                               />
                               <div className="flex gap-2">
@@ -1160,18 +1365,13 @@ export default function CreateCase() {
                               </div>
                             </div>
 
-                            {/* Tests list */}
                             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                               {filteredTests.map((t) => {
                                 const xid = String(t._id);
                                 const checked = !!blk.tests.find((x) => String(x.testId) === xid);
                                 return (
                                   <label key={xid} className="flex items-center gap-2 border rounded p-2">
-                                    <input
-                                      type="checkbox"
-                                      checked={checked}
-                                      onChange={() => toggleTestInPlan(tid, xid)}
-                                    />
+                                    <input type="checkbox" checked={checked} onChange={() => toggleTestInPlan(tid, xid)} />
                                     <span className="text-sm">{t.name}</span>
                                   </label>
                                 );
@@ -1187,7 +1387,6 @@ export default function CreateCase() {
                               )}
                             </div>
 
-                            {/* Selected chips */}
                             {!!blk.tests.length && (
                               <div className="flex flex-wrap gap-2 pt-1">
                                 {blk.tests.map(({ testId }) => (
@@ -1214,9 +1413,8 @@ export default function CreateCase() {
                     </div>
                   );
                 })}
-                {!therapyPlan.length && (
-                  <div className="text-sm text-gray-500">No therapies added yet.</div>
-                )}
+
+                {!therapyPlan.length && <div className="text-sm text-gray-500">No therapies added yet.</div>}
               </div>
             </section>
 

@@ -158,20 +158,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
       icon: <LayoutDashboard className="w-5 h-5" />,
     },
 
-    {
-      key: "catalog",
-      name: "Catalog",
-      path: "/admin/",
-      icon: <Stethoscope className="w-5 h-5" />,
-      children: [
-        {
-          key: "therapy_catalog",
-          name: "Therapy Catalog",
-          path: "/admin/therapy-catalog",
-          icon: <Stethoscope className="w-4 h-4" />,
-        },
-      ],
-    },
 
     {
       key: "cases",
@@ -194,26 +180,26 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
       ],
     },
 
-    {
-      key: "assignments",
-      name: "Assignments",
-      path: "/admin/",
-      icon: <ClipboardList className="w-5 h-5" />,
-      children: [
-        {
-          key: "assignment_manager",
-          name: "Manage Assignments",
-          path: "/admin/assignments",
-          icon: <ClipboardList className="w-4 h-4" />,
-        },
-        {
-          key: "assignment_manager_List",
-          name: "Assignments List",
-          path: "/admin/assignment_manager_List",
-          icon: <ClipboardList className="w-4 h-4" />,
-        },
-      ],
-    },
+    // {
+    //   key: "assignments",
+    //   name: "Assignments",
+    //   path: "/admin/",
+    //   icon: <ClipboardList className="w-5 h-5" />,
+    //   children: [
+    //     {
+    //       key: "assignment_manager",
+    //       name: "Manage Assignments",
+    //       path: "/admin/assignments",
+    //       icon: <ClipboardList className="w-4 h-4" />,
+    //     },
+    //     {
+    //       key: "assignment_manager_List",
+    //       name: "Assignments List",
+    //       path: "/admin/assignment_manager_List",
+    //       icon: <ClipboardList className="w-4 h-4" />,
+    //     },
+    //   ],
+    // },
 
     {
       key: "billing",
