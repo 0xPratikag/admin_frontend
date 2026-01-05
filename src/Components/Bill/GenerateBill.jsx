@@ -16,6 +16,13 @@ const inr = (n) =>
 
 const fmtMins = (n) => (Number.isFinite(Number(n)) ? `${Number(n)} min` : "—");
 
+const toNum = (v) => {
+  const n = parseFloat(String(v ?? "").trim());
+  return Number.isFinite(n) ? n : 0;
+};
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 const calcRemaining = (b) => {
   if (!b) return 0;
   const total =
@@ -85,8 +92,20 @@ export default function GenerateBill() {
   const [billDate, setBillDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [dueDate, setDueDate] = useState("");
   const [items, setItems] = useState([]); // ✅ ONLY plan-derived items (or existing bill)
-  const [taxPercent, setTaxPercent] = useState(0);
-  const [discountPercent, setDiscountPercent] = useState(0);
+
+  /**
+   * ✅ UPDATED: Tax & Discount now support BOTH % and ₹ value
+   * taxMode/discountMode: "percent" | "amount"
+   * We keep percent + amount synced so user can type either.
+   */
+  const [taxMode, setTaxMode] = useState("percent");
+  const [taxPercent, setTaxPercent] = useState("0");
+  const [taxValue, setTaxValue] = useState("0");
+
+  const [discountMode, setDiscountMode] = useState("percent");
+  const [discountPercent, setDiscountPercent] = useState("0");
+  const [discountValue, setDiscountValue] = useState("0");
+
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
@@ -234,8 +253,38 @@ export default function GenerateBill() {
       if (data) {
         setBillDate(toInputDate(data.bill_date) || billDate);
         setDueDate(toInputDate(data.due_date) || "");
-        setTaxPercent(Number(data.summary?.tax_percent || 0));
-        setDiscountPercent(Number(data.summary?.discount_percent || 0));
+
+        const s = data.summary || {};
+        const tp = toNum(s?.tax_percent);
+        const ta = s?.tax_amount !== undefined && s?.tax_amount !== null ? toNum(s.tax_amount) : null;
+
+        const dp = toNum(s?.discount_percent);
+        const da =
+          s?.discount_amount !== undefined && s?.discount_amount !== null
+            ? toNum(s.discount_amount)
+            : null;
+
+        // Prefer amount mode if server provided amount explicitly (>0 or even =0 but present)
+        if (ta !== null) {
+          setTaxMode("amount");
+          setTaxValue(String(round2(ta)));
+          setTaxPercent(String(round2(tp))); // will sync later based on subtotal anyway
+        } else {
+          setTaxMode("percent");
+          setTaxPercent(String(round2(tp)));
+          setTaxValue("0"); // will sync later
+        }
+
+        if (da !== null) {
+          setDiscountMode("amount");
+          setDiscountValue(String(round2(da)));
+          setDiscountPercent(String(round2(dp)));
+        } else {
+          setDiscountMode("percent");
+          setDiscountPercent(String(round2(dp)));
+          setDiscountValue("0"); // will sync later
+        }
+
         setNotes(data.notes || "");
 
         const li = Array.isArray(data.line_items) ? data.line_items : [];
@@ -352,18 +401,68 @@ export default function GenerateBill() {
     [items]
   );
 
-  const taxAmount = useMemo(
-    () => (subtotal * (Number(taxPercent) || 0)) / 100,
-    [subtotal, taxPercent]
-  );
+  // --- keep % and ₹ synced when subtotal/items change ---
+  useEffect(() => {
+    // Tax sync
+    if (taxMode === "percent") {
+      const amt = round2((subtotal * toNum(taxPercent)) / 100);
+      setTaxValue(String(amt));
+    } else {
+      const pct = subtotal > 0 ? round2((toNum(taxValue) / subtotal) * 100) : 0;
+      setTaxPercent(String(pct));
+    }
 
-  const discountAmount = useMemo(
-    () => (subtotal * (Number(discountPercent) || 0)) / 100,
-    [subtotal, discountPercent]
-  );
+    // Discount sync
+    if (discountMode === "percent") {
+      const amt = round2((subtotal * toNum(discountPercent)) / 100);
+      setDiscountValue(String(amt));
+    } else {
+      const pct = subtotal > 0 ? round2((toNum(discountValue) / subtotal) * 100) : 0;
+      setDiscountPercent(String(pct));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subtotal, taxMode, discountMode]);
+
+  // --- input handlers (user can type % or ₹ based on selected mode) ---
+  const onTaxPercentChange = (v) => {
+    setTaxPercent(v);
+    const amt = round2((subtotal * toNum(v)) / 100);
+    setTaxValue(String(amt));
+  };
+
+  const onTaxValueChange = (v) => {
+    setTaxValue(v);
+    const pct = subtotal > 0 ? round2((toNum(v) / subtotal) * 100) : 0;
+    setTaxPercent(String(pct));
+  };
+
+  const onDiscountPercentChange = (v) => {
+    setDiscountPercent(v);
+    const amt = round2((subtotal * toNum(v)) / 100);
+    setDiscountValue(String(amt));
+  };
+
+  const onDiscountValueChange = (v) => {
+    setDiscountValue(v);
+    const pct = subtotal > 0 ? round2((toNum(v) / subtotal) * 100) : 0;
+    setDiscountPercent(String(pct));
+  };
+
+  // computed amounts used in totals (authoritative by mode)
+  const taxAmount = useMemo(() => {
+    return taxMode === "percent"
+      ? round2((subtotal * toNum(taxPercent)) / 100)
+      : Math.max(0, round2(toNum(taxValue)));
+  }, [subtotal, taxMode, taxPercent, taxValue]);
+
+  const discountAmount = useMemo(() => {
+    return discountMode === "percent"
+      ? round2((subtotal * toNum(discountPercent)) / 100)
+      : Math.max(0, round2(toNum(discountValue)));
+  }, [subtotal, discountMode, discountPercent, discountValue]);
 
   const grandTotal = useMemo(
-    () => Math.max(0, subtotal + taxAmount - discountAmount),
+    () => Math.max(0, round2(subtotal + taxAmount - discountAmount)),
     [subtotal, taxAmount, discountAmount]
   );
 
@@ -396,6 +495,16 @@ export default function GenerateBill() {
       );
     }
 
+    if (toNum(taxPercent) < 0 || toNum(taxValue) < 0) {
+      return setErrorMsg("Tax cannot be negative.");
+    }
+    if (toNum(discountPercent) < 0 || toNum(discountValue) < 0) {
+      return setErrorMsg("Discount cannot be negative.");
+    }
+    if (discountAmount > subtotal + taxAmount) {
+      return setErrorMsg("Discount cannot be more than (Subtotal + Tax).");
+    }
+
     const allItems = items.map((i) => ({
       description: String(i.description || "").trim(),
       quantity: Number(i.quantity),
@@ -408,8 +517,21 @@ export default function GenerateBill() {
       due_date: dueDate || null,
       items: allItems,
       summary: {
-        tax_percent: Number(taxPercent) || 0,
-        discount_percent: Number(discountPercent) || 0,
+        // ✅ keep percent for backward-compat
+        tax_percent: round2(toNum(taxPercent)) || 0,
+        discount_percent: round2(toNum(discountPercent)) || 0,
+
+        // ✅ NEW: also send value
+        tax_amount: round2(taxAmount) || 0,
+        discount_amount: round2(discountAmount) || 0,
+
+        // ✅ NEW: mode hint (optional for backend)
+        tax_mode: taxMode,
+        discount_mode: discountMode,
+
+        // optional (handy for server / receipts)
+        subtotal: round2(subtotal),
+        grand_total: round2(grandTotal),
       },
       notes: notes || "",
     };
@@ -461,10 +583,7 @@ export default function GenerateBill() {
                   <th className="py-2 pr-4">Duration</th>
                   <th className="py-2 pr-4">Per Session ✓</th>
                   <th className="py-2 pr-4">Per Package ✓</th>
-
-                  {/* ✅ NEW: show package count before total sessions */}
                   <th className="py-2 pr-4">Package Count</th>
-
                   <th className="py-2 pr-4">Total Sessions</th>
                   <th className="py-2 pr-4">Rate Used (per session)</th>
                 </tr>
@@ -521,7 +640,6 @@ export default function GenerateBill() {
                           )}
                         </td>
 
-                        {/* ✅ NEW: package count cell */}
                         <td className="py-2 pr-4">
                           {perPackage ? (
                             <span className="font-semibold">{packagesCount}</span>
@@ -606,9 +724,7 @@ export default function GenerateBill() {
               </table>
             </div>
           ) : (
-            <div className="text-sm text-gray-500 mt-1">
-              Tests not enabled for this therapy.
-            </div>
+            <div className="text-sm text-gray-500 mt-1">Tests not enabled for this therapy.</div>
           )}
         </div>
       </div>
@@ -752,35 +868,107 @@ export default function GenerateBill() {
                 <span className="font-semibold">₹ {subtotal.toFixed(2)}</span>
               </div>
 
+              {/* ✅ UPDATED: TAX supports % or ₹ */}
               <div className="flex items-center justify-between py-1">
-                <label className="text-gray-600 flex items-center gap-2">
-                  Tax (%)
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={taxPercent}
-                    onChange={(e) => setTaxPercent(e.target.value)}
-                    className="w-24 rounded-md border p-1"
+                <div className="text-gray-600 flex items-center gap-2 flex-wrap">
+                  <span>Tax</span>
+
+                  <select
+                    value={taxMode}
+                    onChange={(e) => setTaxMode(e.target.value)}
+                    className="rounded-md border p-1"
                     disabled={disableAllEdits}
-                  />
-                </label>
+                    title="Choose tax input type"
+                  >
+                    <option value="percent">%</option>
+                    <option value="amount">₹</option>
+                  </select>
+
+                  {taxMode === "percent" ? (
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={taxPercent}
+                      onChange={(e) => onTaxPercentChange(e.target.value)}
+                      className="w-28 rounded-md border p-1"
+                      disabled={disableAllEdits}
+                      placeholder="%"
+                    />
+                  ) : (
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={taxValue}
+                      onChange={(e) => onTaxValueChange(e.target.value)}
+                      className="w-28 rounded-md border p-1"
+                      disabled={disableAllEdits}
+                      placeholder="₹"
+                    />
+                  )}
+
+                  <span className="text-xs text-gray-500">
+                    {taxMode === "percent"
+                      ? `= ₹ ${taxAmount.toFixed(2)}`
+                      : subtotal > 0
+                      ? `≈ ${toNum(taxPercent).toFixed(2)}%`
+                      : "—"}
+                  </span>
+                </div>
+
                 <span className="font-semibold">₹ {taxAmount.toFixed(2)}</span>
               </div>
 
+              {/* ✅ UPDATED: DISCOUNT supports % or ₹ */}
               <div className="flex items-center justify-between py-1">
-                <label className="text-gray-600 flex items-center gap-2">
-                  Discount (%)
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={discountPercent}
-                    onChange={(e) => setDiscountPercent(e.target.value)}
-                    className="w-24 rounded-md border p-1"
+                <div className="text-gray-600 flex items-center gap-2 flex-wrap">
+                  <span>Discount</span>
+
+                  <select
+                    value={discountMode}
+                    onChange={(e) => setDiscountMode(e.target.value)}
+                    className="rounded-md border p-1"
                     disabled={disableAllEdits}
-                  />
-                </label>
+                    title="Choose discount input type"
+                  >
+                    <option value="percent">%</option>
+                    <option value="amount">₹</option>
+                  </select>
+
+                  {discountMode === "percent" ? (
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={discountPercent}
+                      onChange={(e) => onDiscountPercentChange(e.target.value)}
+                      className="w-28 rounded-md border p-1"
+                      disabled={disableAllEdits}
+                      placeholder="%"
+                    />
+                  ) : (
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={discountValue}
+                      onChange={(e) => onDiscountValueChange(e.target.value)}
+                      className="w-28 rounded-md border p-1"
+                      disabled={disableAllEdits}
+                      placeholder="₹"
+                    />
+                  )}
+
+                  <span className="text-xs text-gray-500">
+                    {discountMode === "percent"
+                      ? `= ₹ ${discountAmount.toFixed(2)}`
+                      : subtotal > 0
+                      ? `≈ ${toNum(discountPercent).toFixed(2)}%`
+                      : "—"}
+                  </span>
+                </div>
+
                 <span className="font-semibold">- ₹ {discountAmount.toFixed(2)}</span>
               </div>
 
