@@ -22,6 +22,7 @@ const api = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL });
 // -------- DOB/Age helpers --------
 const pad2 = (n) => String(n).padStart(2, "0");
 const toISODate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const todayISO = () => toISODate(new Date());
 
 function isValidDateString(s) {
   if (!s) return false;
@@ -51,6 +52,43 @@ function calcDobFromAge(ageVal) {
   const d = today.getDate();
   const dob = new Date(y, m, d);
   return toISODate(dob);
+}
+
+// -------- Discount helpers --------
+// discountSlabs: [{min_sessions,max_sessions,discount_percent,isActive}]
+function computeDiscountPercent(discountSlabs, sessionsCount) {
+  const n = Number(sessionsCount);
+  if (!Number.isFinite(n) || n < 1) return 0;
+  if (!Array.isArray(discountSlabs) || discountSlabs.length === 0) return 0;
+
+  const slabs = discountSlabs
+    .filter((x) => x && x.isActive !== false)
+    .map((x) => ({
+      min: Number(x.min_sessions),
+      max: Number(x.max_sessions),
+      pct: Number(x.discount_percent),
+    }))
+    .filter((x) => Number.isFinite(x.min) && Number.isFinite(x.max) && Number.isFinite(x.pct));
+
+  // find matching slabs
+  const matches = slabs.filter((s) => n >= s.min && n <= s.max);
+  if (!matches.length) return 0;
+
+  // choose best match: highest min
+  matches.sort((a, b) => b.min - a.min);
+  const pct = matches[0].pct;
+  if (!Number.isFinite(pct) || pct < 0) return 0;
+  return Math.min(100, pct);
+}
+
+function formatSlabs(discountSlabs) {
+  if (!Array.isArray(discountSlabs) || discountSlabs.length === 0) return "No slabs";
+  const active = discountSlabs.filter((x) => x && x.isActive !== false);
+  if (!active.length) return "No active slabs";
+  const sorted = [...active].sort((a, b) => Number(a.min_sessions || 0) - Number(b.min_sessions || 0));
+  return sorted
+    .map((s) => `${s.min_sessions}-${s.max_sessions}: ${s.discount_percent}%`)
+    .join(", ");
 }
 
 export default function CreateCase() {
@@ -98,17 +136,17 @@ export default function CreateCase() {
   });
 
   /**
-   * Therapy plan payload format (frontend) — includes quantities:
-   * therapyPlan: [
+   * ✅ NEW Therapy Plan payload format (frontend) — table based:
+   * therapy_plan: [
    *  {
    *    therapyId,
    *    subTherapy: [
    *      {
    *        subTherapyId,
-   *        pricePerSession: boolean,   // for current backend compatibility
-   *        pricePerPackage: boolean,   // for current backend compatibility
-   *        sessions_count?: number,    // NEW
-   *        packages_count?: number,    // NEW
+   *        sessions_count,
+   *        discount_percent, // auto from slabs
+   *        start_date,       // default today
+   *        end_date
    *      }
    *    ],
    *    therapyTestsEnabled,
@@ -137,7 +175,7 @@ export default function CreateCase() {
   // ---------- set default joining date (create mode) ----------
   useEffect(() => {
     if (!isUpdate) {
-      const todayStr = toISODate(new Date());
+      const todayStr = todayISO();
       setFormData((p) => ({
         ...p,
         joining_date: p.joining_date || todayStr, // default today only if empty
@@ -170,6 +208,7 @@ export default function CreateCase() {
       try {
         setCatalogLoading((p) => ({ ...p, [key]: true }));
         const [subs, tests] = await Promise.all([
+          // ✅ note: your backend path used here is /subtherapies (as per your code)
           api.get(`/therapies/${therapyId}/subtherapies`, {
             headers: authHeaders,
             params: { isActive: true, limit: 1000 },
@@ -202,42 +241,50 @@ export default function CreateCase() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ---------- fetch case (update mode) ----------
   useEffect(() => {
     const fetchCase = async () => {
       try {
         const res = await api.get(`/view-case/${caseId}`, { headers: authHeaders });
         const c = res.data || {};
 
+        // Build plan (supports legacy flags too)
         const planFromSnapshot = Array.isArray(c.therapy_plan)
           ? c.therapy_plan.map((t) => ({
               therapyId: String(t.therapyId),
               subTherapy: Array.isArray(t.subTherapy)
-                ? t.subTherapy.map((s) => {
-                    const pricePerSession = !!s?.flags?.pricePerSession;
-                    const pricePerPackage = !!s?.flags?.pricePerPackage;
+                ? t.subTherapy
+                    .map((s) => {
+                      const sid = String(s.subTherapyId);
 
-                    const sessions_count =
-                      Number.isFinite(Number(s?.sessions_count)) && Number(s?.sessions_count) > 0
-                        ? Number(s?.sessions_count)
-                        : pricePerSession
-                        ? 1
-                        : undefined;
+                      // legacy compatibility:
+                      const legacyPerSession = !!s?.flags?.pricePerSession || !!s?.pricePerSession;
 
-                    const packages_count =
-                      Number.isFinite(Number(s?.packages_count)) && Number(s?.packages_count) > 0
-                        ? Number(s?.packages_count)
-                        : pricePerPackage
-                        ? 1
-                        : undefined;
+                      const sessions_count_raw =
+                        s?.sessions_count ??
+                        s?.sessionsCount ??
+                        s?.qty ??
+                        (legacyPerSession ? 1 : undefined);
 
-                    return {
-                      subTherapyId: String(s.subTherapyId),
-                      pricePerSession,
-                      pricePerPackage,
-                      sessions_count,
-                      packages_count,
-                    };
-                  })
+                      const sessions_count =
+                        Number.isFinite(Number(sessions_count_raw)) && Number(sessions_count_raw) > 0
+                          ? Number(sessions_count_raw)
+                          : undefined;
+
+                      if (!sessions_count) return null; // not selected
+
+                      return {
+                        subTherapyId: sid,
+                        sessions_count,
+                        discount_percent:
+                          Number.isFinite(Number(s?.discount_percent)) && Number(s?.discount_percent) >= 0
+                            ? Number(s.discount_percent)
+                            : undefined,
+                        start_date: s?.start_date ? String(s.start_date).split("T")[0] : undefined,
+                        end_date: s?.end_date ? String(s.end_date).split("T")[0] : undefined,
+                      };
+                    })
+                    .filter(Boolean)
                 : [],
               therapyTestsEnabled: !!t.therapyTestsEnabled,
               tests: Array.isArray(t.tests) ? t.tests.map((x) => ({ testId: String(x.testId) })) : [],
@@ -290,6 +337,39 @@ export default function CreateCase() {
 
     if (isUpdate) fetchCase();
   }, [caseId, isUpdate, authHeaders, loadCatalogForTherapy]);
+
+  // ---------- normalize discounts & default start_date when catalogs load ----------
+  useEffect(() => {
+    if (!therapyPlan.length) return;
+
+    setTherapyPlan((prev) =>
+      prev.map((blk) => {
+        const tid = String(blk.therapyId);
+        const subList = catalogs[tid]?.subtherapies || [];
+        if (!subList.length) return blk;
+
+        const byId = Object.fromEntries(subList.map((x) => [String(x._id), x]));
+
+        const nextSub = (blk.subTherapy || []).map((row) => {
+          const s = byId[String(row.subTherapyId)];
+          const sessions = Number(row.sessions_count || 0);
+          const computed = s ? computeDiscountPercent(s.discountSlabs, sessions) : 0;
+
+          return {
+            ...row,
+            discount_percent:
+              Number.isFinite(Number(row.discount_percent)) && Number(row.discount_percent) >= 0
+                ? Number(row.discount_percent)
+                : computed,
+            start_date: row.start_date || todayISO(), // default today
+          };
+        });
+
+        return { ...blk, subTherapy: nextSub };
+      })
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalogs]);
 
   // ---------- validation ----------
   const REQUIRED_FIELDS = [
@@ -447,10 +527,6 @@ export default function CreateCase() {
     }));
   };
 
-  const clearAllConditions = () => {
-    setFormData((p) => ({ ...p, conditions: [] }));
-  };
-
   const onConditionKeyDown = (e) => {
     if (e.key === "Enter" || e.key === ",") {
       e.preventDefault();
@@ -478,10 +554,24 @@ export default function CreateCase() {
     });
   };
 
-  // ✅ Mutual exclusive: perSession OR perPackage (checkboxes)
-  const setSubTherapyBilling = (therapyId, subTherapyId, mode, checked) => {
+  // ✅ user types sessions qty -> select/updates row; blank -> clear selection
+  const setSubTherapySessionsCount = (therapyId, subTherapyId, rawVal, subTherapyCatalogRow) => {
     const tid = String(therapyId);
     const sid = String(subTherapyId);
+
+    // if cleared
+    if (rawVal === "" || rawVal === null || rawVal === undefined) {
+      setTherapyPlan((prev) =>
+        prev.map((blk) => {
+          if (String(blk.therapyId) !== tid) return blk;
+          return { ...blk, subTherapy: blk.subTherapy.filter((s) => String(s.subTherapyId) !== sid) };
+        })
+      );
+      return;
+    }
+
+    const n = Math.max(1, Number(rawVal || 1) || 1);
+    const disc = computeDiscountPercent(subTherapyCatalogRow?.discountSlabs, n);
 
     setTherapyPlan((prev) =>
       prev.map((blk) => {
@@ -489,32 +579,42 @@ export default function CreateCase() {
 
         const exists = blk.subTherapy.find((s) => String(s.subTherapyId) === sid);
 
-        if (!checked) {
-          return { ...blk, subTherapy: blk.subTherapy.filter((s) => String(s.subTherapyId) !== sid) };
+        if (!exists) {
+          return {
+            ...blk,
+            subTherapy: [
+              ...blk.subTherapy,
+              {
+                subTherapyId: sid,
+                sessions_count: n,
+                discount_percent: disc,
+                start_date: todayISO(),
+                end_date: "",
+              },
+            ],
+          };
         }
-
-        const next = {
-          subTherapyId: sid,
-          pricePerSession: mode === "session",
-          pricePerPackage: mode === "package",
-          sessions_count: mode === "session" ? Math.max(1, Number(exists?.sessions_count || 1)) : undefined,
-          packages_count: mode === "package" ? Math.max(1, Number(exists?.packages_count || 1)) : undefined,
-        };
-
-        if (!exists) return { ...blk, subTherapy: [...blk.subTherapy, next] };
 
         return {
           ...blk,
-          subTherapy: blk.subTherapy.map((s) => (String(s.subTherapyId) === sid ? next : s)),
+          subTherapy: blk.subTherapy.map((s) =>
+            String(s.subTherapyId) === sid
+              ? {
+                  ...s,
+                  sessions_count: n,
+                  discount_percent: disc,
+                  start_date: s.start_date || todayISO(),
+                }
+              : s
+          ),
         };
       })
     );
   };
 
-  const setSubTherapyQty = (therapyId, subTherapyId, field, rawVal) => {
+  const setSubTherapyDate = (therapyId, subTherapyId, field, value) => {
     const tid = String(therapyId);
     const sid = String(subTherapyId);
-    const n = Math.max(1, Number(rawVal || 1) || 1);
 
     setTherapyPlan((prev) =>
       prev.map((blk) => {
@@ -522,12 +622,11 @@ export default function CreateCase() {
         const exists = blk.subTherapy.find((s) => String(s.subTherapyId) === sid);
         if (!exists) return blk;
 
-        if (field === "sessions_count" && !exists.pricePerSession) return blk;
-        if (field === "packages_count" && !exists.pricePerPackage) return blk;
-
         return {
           ...blk,
-          subTherapy: blk.subTherapy.map((s) => (String(s.subTherapyId) === sid ? { ...s, [field]: n } : s)),
+          subTherapy: blk.subTherapy.map((s) =>
+            String(s.subTherapyId) === sid ? { ...s, [field]: value } : s
+          ),
         };
       })
     );
@@ -657,14 +756,18 @@ export default function CreateCase() {
         therapies: formData.therapies || [],
         conditions: formData.conditions || [],
         other_details: formData.other_details || {},
+
+        // ✅ NEW payload as per table
         therapy_plan: therapyPlan.map((t) => ({
-          ...t,
+          therapyId: t.therapyId,
+          therapyTestsEnabled: !!t.therapyTestsEnabled,
+          tests: (t.tests || []).map((x) => ({ testId: x.testId })),
           subTherapy: (t.subTherapy || []).map((s) => ({
             subTherapyId: s.subTherapyId,
-            pricePerSession: !!s.pricePerSession,
-            pricePerPackage: !!s.pricePerPackage,
-            sessions_count: s.pricePerSession ? Math.max(1, Number(s.sessions_count || 1)) : undefined,
-            packages_count: s.pricePerPackage ? Math.max(1, Number(s.packages_count || 1)) : undefined,
+            sessions_count: Math.max(1, Number(s.sessions_count || 1)),
+            discount_percent: Number.isFinite(Number(s.discount_percent)) ? Number(s.discount_percent) : 0,
+            start_date: s.start_date || todayISO(),
+            end_date: s.end_date || "",
           })),
         })),
       };
@@ -700,15 +803,9 @@ export default function CreateCase() {
           </div>
 
           {success && (
-            <div className="bg-green-50 border border-green-400 text-green-700 p-3 rounded">
-              {success}
-            </div>
+            <div className="bg-green-50 border border-green-400 text-green-700 p-3 rounded">{success}</div>
           )}
-          {error && (
-            <div className="bg-red-50 border border-red-400 text-red-700 p-3 rounded">
-              {error}
-            </div>
-          )}
+          {error && <div className="bg-red-50 border border-red-400 text-red-700 p-3 rounded">{error}</div>}
 
           <form onSubmit={handleSubmit} noValidate className="space-y-10">
             {/* Patient Info */}
@@ -718,9 +815,7 @@ export default function CreateCase() {
               {!isUpdate && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="text-sm text-gray-700 mb-1 block">
-                      Client ID (optional, click Verify)
-                    </label>
+                    <label className="text-sm text-gray-700 mb-1 block">Client ID (optional, click Verify)</label>
                     <div className="flex gap-2">
                       <input
                         id={idFromKey("p_id")}
@@ -1078,8 +1173,8 @@ export default function CreateCase() {
             <section className="space-y-4">
               <h2 className="text-xl font-semibold text-gray-800">🩺 Therapy Plan (builder)</h2>
               <p className="text-sm text-gray-600">
-                Add therapies, select <b>either</b> Per Session or Per Package for each sub-therapy, and provide quantity.
-                Click/hover “View” to see pricing.
+                Add therapies, enter <b>Sessions Qty</b>. Discount auto-calculated by slabs. Start Date default today.
+                Hover “View” to see pricing + slabs.
               </p>
 
               {/* Add Therapy Row */}
@@ -1150,10 +1245,10 @@ export default function CreateCase() {
                           <thead>
                             <tr className="text-left text-gray-600 border-b">
                               <th className="py-2 pr-4">Sub-Therapy</th>
-                              <th className="py-2 pr-4">Per Session</th>
                               <th className="py-2 pr-4">Sessions Qty</th>
-                              <th className="py-2 pr-4">Per Package</th>
-                              <th className="py-2 pr-4">Packages Qty</th>
+                              <th className="py-2 pr-4">Discount (%)</th>
+                              <th className="py-2 pr-4">Start Date</th>
+                              <th className="py-2 pr-4">End Date</th>
                               <th className="py-2 pr-4">Details</th>
                               <th className="py-2 pr-4">Clear</th>
                             </tr>
@@ -1163,37 +1258,26 @@ export default function CreateCase() {
                               const sid = String(s._id);
                               const existing = blk.subTherapy.find((x) => String(x.subTherapyId) === sid);
 
-                              const perSession = !!existing?.pricePerSession;
-                              const perPackage = !!existing?.pricePerPackage;
+                              const sessionsCount = existing?.sessions_count ?? "";
+                              const discountPercent =
+                                existing?.discount_percent ??
+                                computeDiscountPercent(s.discountSlabs, Number(existing?.sessions_count || 0));
 
-                              const sessionsCount = perSession ? Number(existing?.sessions_count || 1) : 1;
-                              const packagesCount = perPackage ? Number(existing?.packages_count || 1) : 1;
+                              const startDateVal = existing?.start_date || todayISO();
+                              const endDateVal = existing?.end_date || "";
 
                               // ✅ adapt to whatever keys backend sends (safe fallbacks)
                               const pricePerSessionVal = Number(s?.price_per_session ?? s?.pricePerSession ?? 0);
-                              const pricePerPackageVal = Number(s?.price_per_package ?? s?.pricePerPackage ?? 0);
-                              const defaultSessionsPerPackage = Number(
-                                s?.default_sessions_per_package ?? s?.sessions_per_package ?? 1
-                              );
                               const durationMins = s?.duration_mins ?? s?.duration ?? null;
 
                               const tooltipContent = (
-                                <div className="w-[280px]">
-                                  <div className="text-sm font-semibold text-gray-900 mb-2">
-                                    {s.name} — Pricing
-                                  </div>
+                                <div className="w-[320px]">
+                                  <div className="text-sm font-semibold text-gray-900 mb-2">{s.name} — Details</div>
+
                                   <div className="text-xs text-gray-700 space-y-1">
                                     <div className="flex justify-between gap-3">
                                       <span>Per Session</span>
                                       <span className="font-medium">₹ {pricePerSessionVal}</span>
-                                    </div>
-                                    <div className="flex justify-between gap-3">
-                                      <span>Per Package</span>
-                                      <span className="font-medium">₹ {pricePerPackageVal}</span>
-                                    </div>
-                                    <div className="flex justify-between gap-3">
-                                      <span>Sessions / Package</span>
-                                      <span className="font-medium">{defaultSessionsPerPackage}</span>
                                     </div>
                                     {!!durationMins && (
                                       <div className="flex justify-between gap-3">
@@ -1201,10 +1285,14 @@ export default function CreateCase() {
                                         <span className="font-medium">{durationMins} mins</span>
                                       </div>
                                     )}
+                                    <div className="mt-2">
+                                      <div className="text-[11px] text-gray-500 mb-1">Discount slabs</div>
+                                      <div className="text-[12px] text-gray-800">{formatSlabs(s.discountSlabs)}</div>
+                                    </div>
                                   </div>
 
                                   <div className="mt-2 text-[11px] text-gray-500">
-                                    Tip: Tick only one (Per Session or Per Package). Quantity input will appear accordingly.
+                                    Tip: Sessions qty change → discount auto updates.
                                   </div>
                                 </div>
                               );
@@ -1218,55 +1306,59 @@ export default function CreateCase() {
                                     )}
                                   </td>
 
+                                  {/* Sessions Qty */}
                                   <td className="py-2 pr-4">
                                     <input
-                                      type="checkbox"
-                                      checked={perSession}
-                                      onChange={(e) => setSubTherapyBilling(tid, sid, "session", e.target.checked)}
-                                      title="Choose Per Session"
+                                      type="number"
+                                      min={1}
+                                      value={sessionsCount}
+                                      onChange={(e) => setSubTherapySessionsCount(tid, sid, e.target.value, s)}
+                                      className="border rounded px-2 py-1 w-28 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                      placeholder="e.g. 5"
                                     />
                                   </td>
 
-                                  <td className="py-2 pr-4">
-                                    {perSession ? (
-                                      <input
-                                        type="number"
-                                        min={1}
-                                        value={sessionsCount}
-                                        onChange={(e) => setSubTherapyQty(tid, sid, "sessions_count", e.target.value)}
-                                        className="border rounded px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                        placeholder="Sessions"
-                                      />
-                                    ) : (
-                                      <span className="text-xs text-gray-400">—</span>
-                                    )}
-                                  </td>
-
+                                  {/* Discount (disabled/readOnly) */}
                                   <td className="py-2 pr-4">
                                     <input
-                                      type="checkbox"
-                                      checked={perPackage}
-                                      onChange={(e) => setSubTherapyBilling(tid, sid, "package", e.target.checked)}
-                                      title="Choose Per Package"
+                                      type="number"
+                                      value={Number.isFinite(Number(discountPercent)) ? Number(discountPercent) : 0}
+                                      readOnly
+                                      disabled
+                                      className="border rounded px-2 py-1 w-28 bg-gray-100 text-gray-700"
+                                      title="Auto calculated from discount slabs"
                                     />
                                   </td>
 
+                                  {/* Start Date (default today) */}
                                   <td className="py-2 pr-4">
-                                    {perPackage ? (
-                                      <input
-                                        type="number"
-                                        min={1}
-                                        value={packagesCount}
-                                        onChange={(e) => setSubTherapyQty(tid, sid, "packages_count", e.target.value)}
-                                        className="border rounded px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                        placeholder="Packages"
-                                      />
-                                    ) : (
-                                      <span className="text-xs text-gray-400">—</span>
-                                    )}
+                                    <input
+                                      type="date"
+                                      value={startDateVal}
+                                      disabled={!existing}
+                                      onChange={(e) => setSubTherapyDate(tid, sid, "start_date", e.target.value)}
+                                      className={`border rounded px-2 py-1 w-40 focus:outline-none ${
+                                        existing ? "focus:ring-2 focus:ring-indigo-500" : "bg-gray-100 text-gray-500"
+                                      }`}
+                                      title={!existing ? "Enter Sessions Qty to enable" : "Start Date"}
+                                    />
                                   </td>
 
-                                  {/* ✅ FIXED tooltip: rendered in body (no overflow clipping) */}
+                                  {/* End Date */}
+                                  <td className="py-2 pr-4">
+                                    <input
+                                      type="date"
+                                      value={endDateVal}
+                                      disabled={!existing}
+                                      onChange={(e) => setSubTherapyDate(tid, sid, "end_date", e.target.value)}
+                                      className={`border rounded px-2 py-1 w-40 focus:outline-none ${
+                                        existing ? "focus:ring-2 focus:ring-indigo-500" : "bg-gray-100 text-gray-500"
+                                      }`}
+                                      title={!existing ? "Enter Sessions Qty to enable" : "End Date"}
+                                    />
+                                  </td>
+
+                                  {/* Tooltip details */}
                                   <td className="py-2 pr-4">
                                     <Tippy
                                       content={tooltipContent}
@@ -1274,7 +1366,7 @@ export default function CreateCase() {
                                       placement="right"
                                       interactive
                                       appendTo={() => document.body}
-                                      maxWidth={320}
+                                      maxWidth={360}
                                       delay={[80, 0]}
                                     >
                                       <button
@@ -1286,8 +1378,9 @@ export default function CreateCase() {
                                     </Tippy>
                                   </td>
 
+                                  {/* Clear */}
                                   <td className="py-2 pr-4">
-                                    {(perSession || perPackage) ? (
+                                    {existing ? (
                                       <button
                                         type="button"
                                         onClick={() => clearSubTherapySelection(tid, sid)}
@@ -1316,7 +1409,7 @@ export default function CreateCase() {
 
                         {!!cat.subtherapies.length && (
                           <div className="mt-2 text-xs text-gray-500">
-                            Note: Selecting <b>Per Session</b> will automatically unselect <b>Per Package</b> (and vice versa).
+                            Note: Sessions Qty blank means not selected. Discount auto comes from slabs.
                           </div>
                         )}
                       </div>

@@ -54,9 +54,7 @@ const CaseDetail = () => {
         friendly,
       });
 
-      toast.error(apiMsg, {
-        id: "case-detail-error",
-      });
+      toast.error(apiMsg, { id: "case-detail-error" });
     } finally {
       setLoading(false);
     }
@@ -70,7 +68,7 @@ const CaseDetail = () => {
       setBill(res.data || null);
     } catch (error) {
       if (error?.response?.status === 404) {
-        setBill(null); // no bill yet for this case
+        setBill(null);
       } else {
         console.error("Error fetching bill:", error);
         const msg =
@@ -104,17 +102,14 @@ const CaseDetail = () => {
     }
   }, [loading, billLoading, errorState, caseData]);
 
-  // Navigate to bill editor — existing page (PUT /cases/:caseId/bill)
   const handleGenerateOrEditBill = () => {
     navigate(`/admin/generate-bill`, { state: { caseData, existingBill: bill } });
   };
 
-  // Edit case
   const handleEdit = () => {
     navigate(`/admin/edit-case/${caseId}`);
   };
 
-  // ---- helpers ----
   const formatDate = (iso) => {
     if (!iso) return "N/A";
     const d = new Date(iso);
@@ -215,16 +210,14 @@ const CaseDetail = () => {
     }
   };
 
-  // ✅ Lock editing if bill exists (generated)
   const isEditLocked = !!bill;
 
-  // ✅ Lock bill editing if fully paid
   const isBillFullyPaid =
     bill?.payment_status === "paid" ||
     (typeof bill?.total_amount === "number" &&
       Math.max(0, Number(bill.total_amount) - Number(bill.paid_amount || 0)) <= 0);
 
-  // ---- early exits (NO HOOKS AFTER THIS LINE) ----
+  // ---- early exits ----
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -287,10 +280,11 @@ const CaseDetail = () => {
     );
   }
 
-  // Safe destructure after guards
+  // Safe destructure
   const {
     _id,
-    branchId,
+    case_uid,
+    branchId, // may exist in old docs
     created_by,
     assigned_to,
     p_id,
@@ -335,6 +329,40 @@ const CaseDetail = () => {
     return m;
   })();
 
+  // ---- mixed subtherapy helpers ----
+  const getBillingMode = (s) => {
+    const perSession = !!s?.flags?.pricePerSession;
+    const perPackage = !!s?.flags?.pricePerPackage;
+
+    // New model doesn't have flags, treat as per-session (because you now store sessions_count)
+    if (!s?.flags) return "Per Session";
+
+    if (perPackage) return "Per Package";
+    if (perSession) return "Per Session";
+    return "Per Session";
+  };
+
+  const getQty = (s) => {
+    const mode = getBillingMode(s);
+    if (mode === "Per Package") return Number(s?.packages_count || 0) || 0;
+    return Number(s?.sessions_count || 0) || 0;
+  };
+
+  const getRate = (s) => {
+    const mode = getBillingMode(s);
+    if (mode === "Per Package") return Number(s?.price_per_package || 0) || 0;
+    return Number(s?.price_per_session || 0) || 0;
+  };
+
+  const getDiscount = (s) => Number(s?.discount || 0) || 0;
+
+  const calcLineTotal = (s) => {
+    const qty = getQty(s);
+    const rate = getRate(s);
+    const discount = getDiscount(s);
+    return Math.max(0, qty * rate - discount);
+  };
+
   const remaining =
     bill && typeof bill.total_amount === "number"
       ? Math.max(0, Number(bill.total_amount) - Number(bill.paid_amount || 0))
@@ -355,9 +383,25 @@ const CaseDetail = () => {
         {/* Header */}
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-8">
           <div className="space-y-2">
-            <h2 className="text-3xl md:text-4xl font-extrabold text-indigo-800">📝 Case Details</h2>
+            <h2 className="text-3xl md:text-4xl font-extrabold text-indigo-800">
+              📝 Case Details
+            </h2>
 
             <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2">
+                <Label>Case UID</Label>
+                <Chip variant="green">{case_uid || "N/A"}</Chip>
+                {case_uid && (
+                  <button
+                    onClick={() => copyText(case_uid)}
+                    className="text-xs text-indigo-600 hover:underline"
+                    title="Copy Case UID"
+                  >
+                    Copy
+                  </button>
+                )}
+              </div>
+
               <div className="flex items-center gap-2">
                 <Label>P.ID</Label>
                 <Chip variant="indigo">{p_id || "N/A"}</Chip>
@@ -388,9 +432,7 @@ const CaseDetail = () => {
 
               <div className="flex items-center gap-2">
                 <Label>Status</Label>
-                <Chip variant="slate" title="Case status">
-                  {status || "open"}
-                </Chip>
+                <Chip variant="slate">{status || "open"}</Chip>
               </div>
             </div>
           </div>
@@ -398,7 +440,7 @@ const CaseDetail = () => {
           <div className="flex flex-col items-start md:items-end gap-1">
             <div className="flex flex-wrap gap-3">
               <button
-                onClick={isEditLocked ? undefined : handleEdit}
+                onClick={isEditLocked ? undefined : () => navigate(`/admin/edit-case/${caseId}`)}
                 disabled={isEditLocked}
                 className={`px-4 py-2 rounded-lg shadow text-sm font-semibold ${
                   isEditLocked
@@ -411,9 +453,7 @@ const CaseDetail = () => {
               </button>
 
               <button
-                onClick={
-                  bill && isBillFullyPaid ? undefined : handleGenerateOrEditBill
-                }
+                onClick={bill && isBillFullyPaid ? undefined : () => navigate(`/admin/generate-bill`, { state: { caseData, existingBill: bill } })}
                 disabled={bill && isBillFullyPaid}
                 className={`px-4 py-2 rounded-lg shadow text-sm font-semibold ${
                   bill && isBillFullyPaid
@@ -500,8 +540,8 @@ const CaseDetail = () => {
           </div>
 
           <div className="bg-green-50 p-4 rounded-md shadow-sm">
-            <Label>Total Cost (legacy)</Label>
-            <p className="font-medium text-base mt-1">₹ {Number(total_cost || 0)}</p>
+            <Label>Total Cost</Label>
+            <p className="font-medium text-base mt-1">{inr(total_cost)}</p>
           </div>
 
           <div className="bg-green-50 p-4 rounded-md shadow-sm">
@@ -571,7 +611,7 @@ const CaseDetail = () => {
             </p>
           </div>
 
-          {/* Therapies & Conditions (legacy tags) */}
+          {/* Legacy tags */}
           <div className="bg-purple-100 p-4 rounded-md shadow-sm">
             <p className="text-sm text-gray-500 mb-1 font-semibold">🩺 Therapy Tags (legacy)</p>
             <div className="flex flex-wrap gap-2">
@@ -638,7 +678,7 @@ const CaseDetail = () => {
           </div>
         </div>
 
-        {/* ===================== SELECTED THERAPIES (from snapshot) ===================== */}
+        {/* Selected Therapies */}
         <div className="mt-8">
           <h3 className="text-xl font-bold text-indigo-800 mb-2">Selected Therapies</h3>
           <div className="flex flex-wrap gap-2">
@@ -654,7 +694,7 @@ const CaseDetail = () => {
           </div>
         </div>
 
-        {/* ===================== THERAPY PLAN SNAPSHOT ===================== */}
+        {/* Therapy Plan Snapshot */}
         <div className="mt-8">
           <h3 className="text-2xl font-bold text-indigo-800 mb-3">🩺 Therapy Plan Snapshot</h3>
 
@@ -666,6 +706,13 @@ const CaseDetail = () => {
                 const tid = String(blk?.therapyId || idx);
                 const subList = Array.isArray(blk?.subTherapy) ? blk.subTherapy : [];
                 const testsList = Array.isArray(blk?.tests) ? blk.tests : [];
+
+                // totals per therapy block
+                const subTotal = subList.reduce((sum, s) => sum + calcLineTotal(s), 0);
+                const testTotal = (blk?.therapyTestsEnabled ? testsList : []).reduce(
+                  (sum, t) => sum + Number(t?.price_per_test || 0),
+                  0
+                );
 
                 return (
                   <div
@@ -694,19 +741,29 @@ const CaseDetail = () => {
                       </div>
                     </div>
 
+                    {/* Sub therapies */}
                     <div className="mt-4">
-                      <Label>Sub-Therapies</Label>
+                      <div className="flex items-center justify-between gap-3">
+                        <Label>Sub-Therapies</Label>
+                        <div className="text-xs text-gray-700">
+                          <span className="font-semibold">Sub Total:</span>{" "}
+                          <span className="text-indigo-700 font-bold">{inr(subTotal)}</span>
+                        </div>
+                      </div>
+
                       <div className="mt-2 overflow-x-auto">
                         <table className="min-w-full text-sm">
                           <thead>
                             <tr className="text-left text-gray-600 border-b">
                               <th className="py-2 pr-4">Name</th>
                               <th className="py-2 pr-4">Duration</th>
-                              <th className="py-2 pr-4">Price / Session</th>
-                              <th className="py-2 pr-4">Price / Package</th>
-                              <th className="py-2 pr-4">Sessions/Package</th>
-                              <th className="py-2 pr-4">Per Session?</th>
-                              <th className="py-2 pr-4">Per Package?</th>
+                              <th className="py-2 pr-4">Mode</th>
+                              <th className="py-2 pr-4">Rate</th>
+                              <th className="py-2 pr-4">S.Qty</th>
+                              <th className="py-2 pr-4">Start</th>
+                              <th className="py-2 pr-4">End</th>
+                              <th className="py-2 pr-4">Discount</th>
+                              <th className="py-2 pr-4">Line Total</th>
                               <th className="py-2 pr-4">Created</th>
                               <th className="py-2 pr-4">Updated</th>
                             </tr>
@@ -714,11 +771,16 @@ const CaseDetail = () => {
                           <tbody>
                             {subList.length ? (
                               subList.map((s, i2) => {
-                                const perSessionYes = !!s?.flags?.pricePerSession;
-                                const perPackageYes = !!s?.flags?.pricePerPackage;
+                                const mode = getBillingMode(s);
+                                const rate = getRate(s);
+                                const qty = getQty(s);
+                                const disc = getDiscount(s);
+                                const line = calcLineTotal(s);
 
-                                // ✅ Show price per package only when Per Package is YES else N/A
-                                const showPackageRate = perPackageYes;
+                                const sessionsPerPack =
+                                  Number.isFinite(Number(s?.default_sessions_per_package))
+                                    ? Number(s?.default_sessions_per_package)
+                                    : "—";
 
                                 return (
                                   <tr
@@ -727,25 +789,23 @@ const CaseDetail = () => {
                                   >
                                     <td className="py-2 pr-4">{s?.name || "—"}</td>
                                     <td className="py-2 pr-4">{fmtMins(s?.duration_mins)}</td>
-                                    <td className="py-2 pr-4">{inr(s?.price_per_session)}</td>
 
                                     <td className="py-2 pr-4">
-                                      {showPackageRate ? inr(s?.price_per_package) : "N/A"}
+                                      <Chip variant={mode === "Per Package" ? "amber" : "green"}>
+                                        {mode}
+                                      </Chip>
                                     </td>
 
-                                    <td className="py-2 pr-4">
-                                      {showPackageRate &&
-                                      Number.isFinite(Number(s?.default_sessions_per_package))
-                                        ? Number(s?.default_sessions_per_package)
-                                        : "—"}
-                                    </td>
+                                    <td className="py-2 pr-4">{inr(rate)}</td>
+                                    <td className="py-2 pr-4">{qty || "—"}</td>
 
-                                    <td className="py-2 pr-4">
-                                      {perSessionYes ? <Chip variant="green">Yes</Chip> : <Chip>No</Chip>}
-                                    </td>
-                                    <td className="py-2 pr-4">
-                                      {perPackageYes ? <Chip variant="green">Yes</Chip> : <Chip>No</Chip>}
-                                    </td>
+
+                                    <td className="py-2 pr-4">{formatDate(s?.start_date)}</td>
+                                    <td className="py-2 pr-4">{formatDate(s?.end_date)}</td>
+
+                                    <td className="py-2 pr-4">{inr(disc)}</td>
+                                    <td className="py-2 pr-4 font-semibold">{inr(line)}</td>
+
                                     <td className="py-2 pr-4">{formatDateTime(s?.createdAt)}</td>
                                     <td className="py-2 pr-4">{formatDateTime(s?.updatedAt)}</td>
                                   </tr>
@@ -753,7 +813,7 @@ const CaseDetail = () => {
                               })
                             ) : (
                               <tr>
-                                <td className="py-3 text-gray-500" colSpan={9}>
+                                <td className="py-3 text-gray-500" colSpan={12}>
                                   No sub-therapies selected.
                                 </td>
                               </tr>
@@ -763,12 +823,20 @@ const CaseDetail = () => {
                       </div>
                     </div>
 
+                    {/* Tests */}
                     <div className="mt-6">
-                      <div className="flex items-center gap-2">
-                        <Label>Tests</Label>
-                        <Chip variant={blk?.therapyTestsEnabled ? "green" : "gray"}>
-                          {blk?.therapyTestsEnabled ? "Enabled" : "Disabled"}
-                        </Chip>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <Label>Tests</Label>
+                          <Chip variant={blk?.therapyTestsEnabled ? "green" : "gray"}>
+                            {blk?.therapyTestsEnabled ? "Enabled" : "Disabled"}
+                          </Chip>
+                        </div>
+
+                        <div className="text-xs text-gray-700">
+                          <span className="font-semibold">Tests Total:</span>{" "}
+                          <span className="text-indigo-700 font-bold">{inr(testTotal)}</span>
+                        </div>
                       </div>
 
                       {blk?.therapyTestsEnabled ? (
@@ -805,7 +873,9 @@ const CaseDetail = () => {
                           </table>
                         </div>
                       ) : (
-                        <div className="text-sm text-gray-500 mt-1">Tests not enabled for this therapy.</div>
+                        <div className="text-sm text-gray-500 mt-1">
+                          Tests not enabled for this therapy.
+                        </div>
                       )}
                     </div>
                   </div>
@@ -815,7 +885,7 @@ const CaseDetail = () => {
           )}
         </div>
 
-        {/* ======================== BILL SECTION ======================== */}
+        {/* BILL SECTION (unchanged, just kept compatible) */}
         <div className="mt-12">
           <h3 className="text-2xl font-bold text-indigo-800 mb-3">🧾 Bill</h3>
 
@@ -903,7 +973,6 @@ const CaseDetail = () => {
                 </div>
               </div>
 
-              {/* Bill actions */}
               <div className="flex flex-wrap gap-3 mt-6">
                 <button
                   onClick={isBillFullyPaid ? undefined : handleGenerateOrEditBill}
@@ -913,7 +982,6 @@ const CaseDetail = () => {
                       ? "bg-gray-300 text-gray-600 cursor-not-allowed"
                       : "bg-indigo-600 hover:bg-indigo-700 text-white"
                   }`}
-                  title={isBillFullyPaid ? "Bill is fully paid — editing disabled" : "Edit Bill"}
                 >
                   ✏️ Edit Bill
                 </button>
@@ -926,7 +994,6 @@ const CaseDetail = () => {
                       ? "bg-gray-300 text-gray-600 cursor-not-allowed"
                       : "bg-amber-600 hover:bg-amber-700 text-white"
                   }`}
-                  title={remaining <= 0 ? "Bill is fully paid" : "Record an offline payment"}
                 >
                   💵 Record Offline Payment
                 </button>
@@ -940,7 +1007,6 @@ const CaseDetail = () => {
             </div>
           )}
         </div>
-        {/* ====================== /BILL SECTION ======================= */}
       </div>
     </div>
   );
