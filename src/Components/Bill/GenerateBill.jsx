@@ -1,1065 +1,809 @@
-// src/pages/GenerateBill.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate, useParams, Link } from "react-router-dom";
+// src/pages/billing/GenerateBill.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import axios from "axios";
 
-const toInputDate = (iso) => {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
-};
+import { buildAxios, clamp, inr, makeKey, round2, toNum } from "./_billingUtils";
 
-const inr = (n) =>
-  new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(
-    Number(n || 0)
-  );
+import useBillingData from "./hooks/useBillingData";
+import { resolvePricing, resolveQtyFromOverrides } from "./billingHelpers";
+import { makeRowId, stablePlanRowId } from "./hooks/useBillingStorage";
 
-const fmtMins = (n) => (Number.isFinite(Number(n)) ? `${Number(n)} min` : "—");
+import ItemsTable from "./ItemsTable";
+import AddItemsModal from "./AddItemsModal";
 
-const toNum = (v) => {
-  const n = parseFloat(String(v ?? "").trim());
-  return Number.isFinite(n) ? n : 0;
-};
+// =====================
+// ROUTES
+// =====================
+const ROUTE_ALL_INVOICES = (caseId) => `/admin/case-invoices/${caseId}`;
 
-const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-
-const calcRemaining = (b) => {
-  if (!b) return 0;
-  const total =
-    typeof b?.total_amount === "number"
-      ? Number(b.total_amount || 0)
-      : Number(b?.summary?.grand_total || 0);
-  const paid = Number(b?.paid_amount || 0);
-  return Math.max(0, total - paid);
-};
-
-const isBillEditLocked = (b) => {
-  if (!b) return false;
-  const st = String(b?.payment_status || "").toLowerCase();
-  if (st === "paid" || st === "partial" || st === "partially_paid") return true;
-  if (calcRemaining(b) <= 0) return true;
-  return false;
-};
-
-// --- helpers for plan qty ---
-const toMin1 = (v) => {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return 1;
-  return Math.max(1, Math.floor(n));
+const emptyDraft = {
+  selectedRowIds: [],
+  overrides: {},
+  customAdds: [],
+  hiddenBaseKeys: [],
 };
 
 export default function GenerateBill() {
   const { caseId: caseIdFromRoute } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-
   const prefilledCase = location?.state?.caseData || null;
-  const existingBillFromState = location?.state?.existingBill || null;
 
-  // ------- axios instance -------
-  const api = useMemo(
-    () =>
-      axios.create({
-        baseURL: import.meta.env.VITE_API_BASE_URL,
-        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
-      }),
-    []
-  );
+  const api = useMemo(() => axios.create(buildAxios()), []);
 
-  // ------- case selection -------
-  const [cases, setCases] = useState([]);
-  const [casesLoading, setCasesLoading] = useState(true);
-  const [casesError, setCasesError] = useState("");
+  const {
+    cases,
+    casesLoading,
+    casesError,
+    fetchCases,
+
+    caseDetail,
+    caseDetailLoading,
+    caseDetailError,
+    fetchCaseDetail,
+
+    invoices,
+    invoicesLoading,
+    fetchInvoices,
+
+    billedMap,
+    hydrateBilledMap,
+
+    therapyList,
+    therapyLoading,
+    fetchTherapies,
+
+    catalogs,
+    catalogLoading,
+    loadCatalogForTherapy,
+  } = useBillingData(api);
+
+  // UI state
   const [caseSearch, setCaseSearch] = useState("");
-  const [selectedCaseId, setSelectedCaseId] = useState(
-    caseIdFromRoute || prefilledCase?._id || ""
-  );
-
-  // ✅ map: caseId -> { locked: boolean, status: string }
-  const [caseLockMap, setCaseLockMap] = useState({});
-  const [locksLoading, setLocksLoading] = useState(false);
-
-  // Full case detail (to read therapy_plan)
-  const [caseDetail, setCaseDetail] = useState(null);
-  const [caseDetailLoading, setCaseDetailLoading] = useState(false);
-  const [caseDetailError, setCaseDetailError] = useState("");
-
-  // ------- existing bill (if any) -------
-  const [existingBill, setExistingBill] = useState(existingBillFromState || null);
-  const [billLoading, setBillLoading] = useState(false);
-
-  // ------- form state -------
-  const [billDate, setBillDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [dueDate, setDueDate] = useState("");
-  const [items, setItems] = useState([]); // ✅ ONLY plan-derived items (or existing bill)
-
-  /**
-   * ✅ UPDATED: Tax & Discount now support BOTH % and ₹ value
-   * taxMode/discountMode: "percent" | "amount"
-   * We keep percent + amount synced so user can type either.
-   */
-  const [taxMode, setTaxMode] = useState("percent");
-  const [taxPercent, setTaxPercent] = useState("0");
-  const [taxValue, setTaxValue] = useState("0");
-
-  const [discountMode, setDiscountMode] = useState("percent");
-  const [discountPercent, setDiscountPercent] = useState("0");
-  const [discountValue, setDiscountValue] = useState("0");
-
-  const [notes, setNotes] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [errorMsg, setErrorMsg] = useState("");
-
-  // UI toggles
-  const [showPlanDetails, setShowPlanDetails] = useState(true);
-
-  // ------- fetch cases (server-side search) -------
-  const fetchCases = async (q = "") => {
-    setCasesLoading(true);
-    setCasesError("");
-    try {
-      const { data } = await api.get("/search-cases", {
-        params: q ? { q } : undefined,
-      });
-      const list = Array.isArray(data) ? data : [];
-      setCases(list);
-      await hydrateCaseLocks(list);
-    } catch (e) {
-      console.error("Error fetching cases:", e);
-      setCasesError("Failed to load cases.");
-      setCases([]);
-      setCaseLockMap({});
-    } finally {
-      setCasesLoading(false);
-    }
-  };
-
-  // ✅ mark locked cases (paid/partial) so they won't appear in dropdown
-  const hydrateCaseLocks = async (list) => {
-    try {
-      setLocksLoading(true);
-      const next = {};
-
-      for (const [k, v] of Object.entries(caseLockMap || {})) next[k] = v;
-
-      const checks = (list || []).map(async (c) => {
-        const id = c?._id;
-        if (!id) return;
-        try {
-          const { data } = await api.get(`/cases/${id}/bill`);
-          if (data) {
-            const locked = isBillEditLocked(data);
-            next[id] = {
-              locked,
-              status: String(data?.payment_status || "").toLowerCase() || "unknown",
-            };
-          } else {
-            next[id] = { locked: false, status: "none" };
-          }
-        } catch (e) {
-          if (e?.response?.status === 404) {
-            next[id] = { locked: false, status: "none" };
-          } else {
-            next[id] = next[id] || { locked: false, status: "unknown" };
-          }
-        }
-      });
-
-      await Promise.allSettled(checks);
-      setCaseLockMap(next);
-    } finally {
-      setLocksLoading(false);
-    }
-  };
-
-  // initial load
-  useEffect(() => {
-    fetchCases("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // live search
-  useEffect(() => {
-    const t = setTimeout(() => fetchCases(caseSearch.trim()), 300);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [caseSearch]);
-
-  // ensure chosen case appears in dropdown
-  useEffect(() => {
-    const ensureCasePresent = async () => {
-      if (!selectedCaseId) return;
-      const exists = cases.some((c) => c._id === selectedCaseId);
-      if (!exists) {
-        try {
-          const { data } = await api.get(`/view-case/${selectedCaseId}`);
-          if (data?._id) {
-            setCases((prev) => [data, ...prev.filter((p) => p._id !== data._id)]);
-            await hydrateCaseLocks([data]);
-          }
-        } catch {
-          // ignore
-        }
-      }
-    };
-    ensureCasePresent();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCaseId, cases.length]);
+  const [selectedCaseId, setSelectedCaseId] = useState(caseIdFromRoute || prefilledCase?._id || "");
 
   const selectedCaseBrief = useMemo(
     () => cases.find((c) => c._id === selectedCaseId) || prefilledCase || null,
     [cases, selectedCaseId, prefilledCase]
   );
 
-  const selectableCases = useMemo(() => {
-    return (cases || []).filter((c) => !caseLockMap?.[c._id]?.locked);
-  }, [cases, caseLockMap]);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  const selectedCaseIsLocked = useMemo(() => {
-    if (!selectedCaseId) return false;
-    return !!caseLockMap?.[selectedCaseId]?.locked;
-  }, [selectedCaseId, caseLockMap]);
+  // selection (row-based)
+  const [selectedRowIds, setSelectedRowIds] = useState([]);
+  const [overrides, setOverrides] = useState({}); // rowId -> { qty }
 
-  // fetch full case detail (therapy_plan etc.)
-  const fetchCaseDetail = async (cid) => {
-    if (!cid) return;
-    setCaseDetailLoading(true);
-    setCaseDetailError("");
-    try {
-      const { data } = await api.get(`/view-case/${cid}`);
-      setCaseDetail(data || null);
-    } catch (e) {
-      console.error("Error fetching full case detail:", e);
-      setCaseDetailError(
-        e?.response?.data?.error ||
-          e?.response?.data?.message ||
-          "Failed to load case detail."
-      );
-      setCaseDetail(null);
-    } finally {
-      setCaseDetailLoading(false);
-    }
-  };
+  // custom rows
+  const [customAdds, setCustomAdds] = useState([]);
 
-  // ------- prefill from existing bill (if any) -------
-  const fetchExistingBill = async (cid) => {
-    if (!cid) return;
-    setBillLoading(true);
-    setExistingBill(null);
-    try {
-      const { data } = await api.get(`/cases/${cid}/bill`);
-      setExistingBill(data || null);
+  // hidden plan items (baseKey)
+  const [hiddenBaseKeys, setHiddenBaseKeys] = useState([]);
 
-      if (data) {
-        setBillDate(toInputDate(data.bill_date) || billDate);
-        setDueDate(toInputDate(data.due_date) || "");
+  // add modal
+  const [addOpen, setAddOpen] = useState(false);
 
-        const s = data.summary || {};
-        const tp = toNum(s?.tax_percent);
-        const ta = s?.tax_amount !== undefined && s?.tax_amount !== null ? toNum(s.tax_amount) : null;
+  // draft state flags
+  const draftLoadedRef = useRef(false);
+  const savingDraftRef = useRef(false);
 
-        const dp = toNum(s?.discount_percent);
-        const da =
-          s?.discount_amount !== undefined && s?.discount_amount !== null
-            ? toNum(s.discount_amount)
-            : null;
-
-        // Prefer amount mode if server provided amount explicitly (>0 or even =0 but present)
-        if (ta !== null) {
-          setTaxMode("amount");
-          setTaxValue(String(round2(ta)));
-          setTaxPercent(String(round2(tp))); // will sync later based on subtotal anyway
-        } else {
-          setTaxMode("percent");
-          setTaxPercent(String(round2(tp)));
-          setTaxValue("0"); // will sync later
-        }
-
-        if (da !== null) {
-          setDiscountMode("amount");
-          setDiscountValue(String(round2(da)));
-          setDiscountPercent(String(round2(dp)));
-        } else {
-          setDiscountMode("percent");
-          setDiscountPercent(String(round2(dp)));
-          setDiscountValue("0"); // will sync later
-        }
-
-        setNotes(data.notes || "");
-
-        const li = Array.isArray(data.line_items) ? data.line_items : [];
-        setItems(
-          li.map((x) => ({
-            description: x.description || "",
-            quantity: Number(x.quantity || 1),
-            rate: Number(x.rate || 0),
-          }))
-        );
-      }
-    } catch (e) {
-      if (e?.response?.status === 404) {
-        setExistingBill(null);
-      } else {
-        console.error("Error fetching case bill:", e);
-      }
-    } finally {
-      setBillLoading(false);
-    }
-  };
-
-  // when case changes, load full detail + existing bill
+  // =====================
+  // Init
+  // =====================
   useEffect(() => {
-    if (!selectedCaseId) return;
-    fetchCaseDetail(selectedCaseId);
-    fetchExistingBill(selectedCaseId);
+    fetchCases("");
+    fetchTherapies();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => fetchCases(caseSearch.trim()), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseSearch]);
+
+  // =====================
+  // Load case + draft (server)
+  // =====================
+  useEffect(() => {
+    let alive = true;
+    async function boot() {
+      if (!selectedCaseId) return;
+
+      setErrorMsg("");
+      draftLoadedRef.current = false;
+
+      // load case + invoices
+      fetchCaseDetail(selectedCaseId);
+      fetchInvoices(selectedCaseId);
+
+      // billed map from invoices
+      hydrateBilledMap(selectedCaseId, (x) => makeKey(x));
+
+      // load draft
+      try {
+        const { data } = await api.get(`/cases/${selectedCaseId}/billing-draft`);
+        const d = data?.draft || data; // support both shapes
+
+        if (!alive) return;
+
+        setSelectedRowIds(Array.isArray(d?.selectedRowIds) ? d.selectedRowIds : []);
+        setOverrides(d?.overrides && typeof d.overrides === "object" ? d.overrides : {});
+        setCustomAdds(Array.isArray(d?.customAdds) ? d.customAdds : []);
+        setHiddenBaseKeys(Array.isArray(d?.hiddenBaseKeys) ? d.hiddenBaseKeys : []);
+      } catch (e) {
+        // if no draft found -> empty
+        if (!alive) return;
+        setSelectedRowIds([]);
+        setOverrides({});
+        setCustomAdds([]);
+        setHiddenBaseKeys([]);
+      } finally {
+        if (!alive) return;
+        draftLoadedRef.current = true;
+      }
+    }
+
+    boot();
+    return () => {
+      alive = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCaseId]);
 
-  const billEditLocked = useMemo(() => isBillEditLocked(existingBill), [existingBill]);
+  // =====================
+  // Autosave draft (debounced)
+  // =====================
+  useEffect(() => {
+    if (!selectedCaseId) return;
+    if (!draftLoadedRef.current) return;
 
-  // ------- derive line-items from therapy_plan snapshot -------
-  /**
-   * ✅ Billing rules:
-   * - Always show TOTAL SESSIONS as quantity.
-   * - If per-session: quantity = sessions_count, rate = price_per_session.
-   * - If per-package: totalSessions = packages_count * default_sessions_per_package
-   *   and rate = (price_per_package / default_sessions_per_package)  -> so amount = packages_count * price_per_package.
-   * - Tests: qty = 1, rate = price_per_test.
-   */
-  const buildItemsFromPlan = (planBlocks) => {
+    const t = setTimeout(async () => {
+      if (savingDraftRef.current) return;
+      savingDraftRef.current = true;
+
+      try {
+        await api.put(`/cases/${selectedCaseId}/billing-draft`, {
+          selectedRowIds,
+          overrides,
+          customAdds,
+          hiddenBaseKeys,
+          clientUpdatedAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        // silent (avoid annoying UI spam)
+        console.error("draft save failed", e);
+      } finally {
+        savingDraftRef.current = false;
+      }
+    }, 500);
+
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCaseId, selectedRowIds, overrides, customAdds, hiddenBaseKeys]);
+
+  // pre-load catalogs for therapy_plan therapies
+  useEffect(() => {
+    const blocks = caseDetail?.therapy_plan;
+    if (!Array.isArray(blocks) || !blocks.length) return;
+
+    const ids = Array.from(new Set(blocks.map((b) => String(b?.therapyId || "")).filter(Boolean)));
+    ids.forEach((tid) => loadCatalogForTherapy(tid));
+  }, [caseDetail, loadCatalogForTherapy]);
+
+  // =====================
+  // Helpers
+  // =====================
+  const therapyNameById = useMemo(() => {
+    const m = {};
+    for (const t of therapyList || []) m[String(t._id)] = t.name;
+    return m;
+  }, [therapyList]);
+
+  // plan items
+  const planItems = useMemo(() => {
     const out = [];
-    if (!Array.isArray(planBlocks)) return out;
+    const blocks = caseDetail?.therapy_plan;
+    if (!Array.isArray(blocks)) return out;
 
-    for (const blk of planBlocks) {
-      const tName = blk?.therapy_name || "Therapy";
+    for (const blk of blocks) {
+      const therapyId = String(blk?.therapyId || "");
+      if (!therapyId) continue;
+
+      const therapyName = therapyNameById[therapyId] || blk?.therapy_name || "Therapy";
+      const cat = catalogs[therapyId] || { subtherapies: [], tests: [] };
+
+      const subById = Object.fromEntries((cat.subtherapies || []).map((s) => [String(s._id), s]));
+      const testById = Object.fromEntries((cat.tests || []).map((t) => [String(t._id), t]));
+
+      // subs
       const subs = Array.isArray(blk?.subTherapy) ? blk.subTherapy : [];
-      const tests = Array.isArray(blk?.tests) ? blk.tests : [];
+      for (const row of subs) {
+        const subTherapyId = String(row?.subTherapyId || "");
+        if (!subTherapyId) continue;
 
-      for (const s of subs) {
-        const sName = s?.name || "Sub-therapy";
-        const perSession = !!s?.flags?.pricePerSession;
-        const perPackage = !!s?.flags?.pricePerPackage;
+        const qty = clamp(toNum(row?.sessions_count, 1), 1, 999999);
 
-        const pricePerSession = Number(s?.price_per_session || 0);
-        const pricePerPackage = Number(s?.price_per_package || 0);
+        const subDoc = subById[subTherapyId];
+        const subName = subDoc?.name || row?.name || "Sub-therapy";
+        const basePrice = toNum(
+          subDoc?.price_per_session ?? subDoc?.pricePerSession ?? row?.price_per_session,
+          0
+        );
 
-        const sessionsPerPackage = toMin1(s?.default_sessions_per_package || 1);
-        const sessionsCount = toMin1(s?.sessions_count || 1);
-        const packagesCount = toMin1(s?.packages_count || 1);
+        const baseKey = makeKey({ type: "THERAPY", itemId: therapyId, subItemId: subTherapyId });
 
-        if (perSession) {
-          out.push({
-            description: `${tName} • ${sName} (Per Session ✓)`,
-            quantity: sessionsCount,
-            rate: pricePerSession,
-          });
-        } else if (perPackage) {
-          const totalSessions = packagesCount * sessionsPerPackage;
-          const effectiveRate =
-            sessionsPerPackage > 0
-              ? pricePerPackage / sessionsPerPackage
-              : pricePerPackage;
-
-          out.push({
-            description: `${tName} • ${sName} (Per Package ✓ — ${packagesCount} pkg × ${sessionsPerPackage} sess)`,
-            quantity: totalSessions,
-            rate: Number.isFinite(effectiveRate) ? effectiveRate : 0,
-          });
-        }
+        out.push({
+          source: "PLAN",
+          type: "THERAPY",
+          itemId: therapyId,
+          subItemId: subTherapyId,
+          baseKey,
+          rowId: stablePlanRowId(baseKey),
+          displayName: `${therapyName} • ${subName}`,
+          qty,
+          meta: {
+            basePrice,
+            slabs: subDoc?.discountSlabs || [],
+            durationMins: subDoc?.duration_mins ?? subDoc?.duration ?? null,
+          },
+        });
       }
 
+      // tests
       if (blk?.therapyTestsEnabled) {
-        for (const tt of tests) {
-          const testName = tt?.name || "Test";
+        const tests = Array.isArray(blk?.tests) ? blk.tests : [];
+        for (const t of tests) {
+          const testId = String(t?.testId || "");
+          if (!testId) continue;
+
+          const testDoc = testById[testId];
+          const name = testDoc?.name || t?.name || "Test";
+          const basePrice = toNum(
+            testDoc?.price_per_test ?? testDoc?.pricePerTest ?? t?.price_per_test,
+            0
+          );
+
+          const baseKey = makeKey({ type: "TEST", itemId: testId, subItemId: null });
+
           out.push({
-            description: `${tName} • ${testName} (Test)`,
-            quantity: 1,
-            rate: Number(tt?.price_per_test || 0),
+            source: "PLAN",
+            type: "TEST",
+            itemId: testId,
+            subItemId: null,
+            baseKey,
+            rowId: stablePlanRowId(baseKey),
+            displayName: `${name} • (${therapyName})`,
+            qty: 1,
+            meta: { basePrice, slabs: [] },
           });
         }
       }
     }
 
     return out;
-  };
+  }, [caseDetail, catalogs, therapyNameById]);
 
-  // ✅ AUTO fill items from plan when case selected (only if no existing bill)
-  useEffect(() => {
-    if (!caseDetail?.therapy_plan?.length) return;
-    if (existingBill) return;
-    const derived = buildItemsFromPlan(caseDetail.therapy_plan);
-    setItems(derived);
-  }, [caseDetail, existingBill]);
+  // all rows (filter hidden PLAN)
+  const allSelectableItems = useMemo(() => {
+    const hiddenSet = new Set(hiddenBaseKeys || []);
+    const visiblePlan = (planItems || []).filter((x) => !hiddenSet.has(x.baseKey));
 
-  // totals
-  const subtotal = useMemo(
-    () =>
-      items.reduce(
-        (sum, it) => sum + (Number(it.quantity) || 0) * (Number(it.rate) || 0),
-        0
-      ),
-    [items]
-  );
-
-  // --- keep % and ₹ synced when subtotal/items change ---
-  useEffect(() => {
-    // Tax sync
-    if (taxMode === "percent") {
-      const amt = round2((subtotal * toNum(taxPercent)) / 100);
-      setTaxValue(String(amt));
-    } else {
-      const pct = subtotal > 0 ? round2((toNum(taxValue) / subtotal) * 100) : 0;
-      setTaxPercent(String(pct));
-    }
-
-    // Discount sync
-    if (discountMode === "percent") {
-      const amt = round2((subtotal * toNum(discountPercent)) / 100);
-      setDiscountValue(String(amt));
-    } else {
-      const pct = subtotal > 0 ? round2((toNum(discountValue) / subtotal) * 100) : 0;
-      setDiscountPercent(String(pct));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subtotal, taxMode, discountMode]);
-
-  // --- input handlers (user can type % or ₹ based on selected mode) ---
-  const onTaxPercentChange = (v) => {
-    setTaxPercent(v);
-    const amt = round2((subtotal * toNum(v)) / 100);
-    setTaxValue(String(amt));
-  };
-
-  const onTaxValueChange = (v) => {
-    setTaxValue(v);
-    const pct = subtotal > 0 ? round2((toNum(v) / subtotal) * 100) : 0;
-    setTaxPercent(String(pct));
-  };
-
-  const onDiscountPercentChange = (v) => {
-    setDiscountPercent(v);
-    const amt = round2((subtotal * toNum(v)) / 100);
-    setDiscountValue(String(amt));
-  };
-
-  const onDiscountValueChange = (v) => {
-    setDiscountValue(v);
-    const pct = subtotal > 0 ? round2((toNum(v) / subtotal) * 100) : 0;
-    setDiscountPercent(String(pct));
-  };
-
-  // computed amounts used in totals (authoritative by mode)
-  const taxAmount = useMemo(() => {
-    return taxMode === "percent"
-      ? round2((subtotal * toNum(taxPercent)) / 100)
-      : Math.max(0, round2(toNum(taxValue)));
-  }, [subtotal, taxMode, taxPercent, taxValue]);
-
-  const discountAmount = useMemo(() => {
-    return discountMode === "percent"
-      ? round2((subtotal * toNum(discountPercent)) / 100)
-      : Math.max(0, round2(toNum(discountValue)));
-  }, [subtotal, discountMode, discountPercent, discountValue]);
-
-  const grandTotal = useMemo(
-    () => Math.max(0, round2(subtotal + taxAmount - discountAmount)),
-    [subtotal, taxAmount, discountAmount]
-  );
-
-  // ------- submit -------
-  const submitBill = async () => {
-    setErrorMsg("");
-
-    if (!selectedCaseId) return setErrorMsg("Please select a case.");
-    if (selectedCaseIsLocked) {
-      return setErrorMsg("This case bill is Paid/Partial — bill editing is not allowed.");
-    }
-    if (billEditLocked) {
-      return setErrorMsg("This bill is Paid/Partial — you don't have permission to edit it.");
-    }
-
-    if (!billDate) return setErrorMsg("Bill date is required.");
-
-    if (!Array.isArray(items) || items.length === 0) {
-      return setErrorMsg(
-        "No billable items found. Please ensure sub-therapies/tests are selected in the case plan."
-      );
-    }
-
-    const invalidItem = items.some(
-      (it) => !it.description || Number(it.quantity) <= 0 || Number(it.rate) < 0
-    );
-    if (invalidItem) {
-      return setErrorMsg(
-        "Each item needs a description, quantity > 0, and a non-negative rate."
-      );
-    }
-
-    if (toNum(taxPercent) < 0 || toNum(taxValue) < 0) {
-      return setErrorMsg("Tax cannot be negative.");
-    }
-    if (toNum(discountPercent) < 0 || toNum(discountValue) < 0) {
-      return setErrorMsg("Discount cannot be negative.");
-    }
-    if (discountAmount > subtotal + taxAmount) {
-      return setErrorMsg("Discount cannot be more than (Subtotal + Tax).");
-    }
-
-    const allItems = items.map((i) => ({
-      description: String(i.description || "").trim(),
-      quantity: Number(i.quantity),
-      rate: Number(i.rate),
-      amount: Number(i.quantity) * Number(i.rate),
+    const fixedCustom = (customAdds || []).map((x) => ({
+      ...x,
+      rowId: x.rowId || makeRowId("c"),
     }));
 
-    const payload = {
-      bill_date: billDate,
-      due_date: dueDate || null,
-      items: allItems,
-      summary: {
-        // ✅ keep percent for backward-compat
-        tax_percent: round2(toNum(taxPercent)) || 0,
-        discount_percent: round2(toNum(discountPercent)) || 0,
+    return [...visiblePlan, ...fixedCustom];
+  }, [planItems, customAdds, hiddenBaseKeys]);
 
-        // ✅ NEW: also send value
-        tax_amount: round2(taxAmount) || 0,
-        discount_amount: round2(discountAmount) || 0,
+  // selected rows resolved
+  const selectedItemsResolved = useMemo(() => {
+    const set = new Set(selectedRowIds);
+    const out = [];
+    for (const it of allSelectableItems) {
+      if (!set.has(it.rowId)) continue;
+      const qty = resolveQtyFromOverrides(it.rowId, it, overrides);
+      const pricing = resolvePricing(it, qty);
+      out.push({ ...it, qty, ...pricing });
+    }
+    return out;
+  }, [allSelectableItems, selectedRowIds, overrides]);
 
-        // ✅ NEW: mode hint (optional for backend)
-        tax_mode: taxMode,
-        discount_mode: discountMode,
-
-        // optional (handy for server / receipts)
-        subtotal: round2(subtotal),
-        grand_total: round2(grandTotal),
-      },
-      notes: notes || "",
+  const summary = useMemo(() => {
+    const totalBase = selectedItemsResolved.reduce((s, it) => s + (it.rowBase || 0), 0);
+    const totalDiscount = selectedItemsResolved.reduce((s, it) => s + (it.rowDiscount || 0), 0);
+    const totalNet = selectedItemsResolved.reduce((s, it) => s + (it.rowTotal || 0), 0);
+    return {
+      totalBase: round2(totalBase),
+      totalDiscount: round2(totalDiscount),
+      totalNet: round2(totalNet),
     };
+  }, [selectedItemsResolved]);
+
+  // =====================
+  // Selection actions
+  // =====================
+  const toggleRow = (rowId) => {
+    setSelectedRowIds((prev) =>
+      prev.includes(rowId) ? prev.filter((x) => x !== rowId) : [...prev, rowId]
+    );
+  };
+
+  const selectAll = () => setSelectedRowIds(allSelectableItems.map((x) => x.rowId));
+  const clearAll = () => setSelectedRowIds([]);
+
+  const onQtyChange = (rowId, raw) => {
+    setOverrides((prev) => ({
+      ...prev,
+      [rowId]: { ...(prev[rowId] || {}), qty: raw },
+    }));
+  };
+
+  // =====================
+  // Duplicate row
+  // =====================
+  const duplicateRow = (it) => {
+    const newRow = {
+      ...it,
+      source: "CUSTOM_DUP",
+      rowId: makeRowId("c"),
+      baseKey: it.baseKey || makeKey({ type: it.type, itemId: it.itemId, subItemId: it.subItemId }),
+    };
+
+    setCustomAdds((prev) => [...(prev || []), newRow]);
+    setSelectedRowIds((prev) => [...prev, newRow.rowId]);
+
+    const currentQty = resolveQtyFromOverrides(it.rowId, it, overrides);
+    setOverrides((prev) => ({ ...prev, [newRow.rowId]: { qty: String(currentQty) } }));
+  };
+
+  // Remove row (PLAN hide + CUSTOM delete) only if never billed
+  const removeRow = (it) => {
+    if (!it) return;
+
+    const billed = billedMap?.[it.baseKey];
+    if (billed?.count) {
+      setErrorMsg("❌ Ye item pehle kisi bill me ja chuka hai, isliye remove allowed nahi.");
+      return;
+    }
+
+    const isCustom =
+      it.source === "CUSTOM" || it.source === "CUSTOM_DUP" || it.source === "INVOICE_CLONE";
+
+    if (isCustom) {
+      setCustomAdds((prev) => (prev || []).filter((x) => x.rowId !== it.rowId));
+    } else {
+      setHiddenBaseKeys((prev) => Array.from(new Set([...(prev || []), it.baseKey])));
+    }
+
+    setSelectedRowIds((prev) => prev.filter((k) => k !== it.rowId));
+    setOverrides((prev) => {
+      const next = { ...prev };
+      delete next[it.rowId];
+      return next;
+    });
+  };
+
+  // =====================
+  // Add modal helpers
+  // =====================
+  const openAddModal = async () => {
+    setAddOpen(true);
+    try {
+      await fetchTherapies();
+    } catch {}
+  };
+
+  const makeRowFromCatalog = ({ therapyId, kind, doc, qty }) => {
+    const tid = String(therapyId);
+    const tDoc = (therapyList || []).find((t) => String(t._id) === tid);
+    const therapyName = tDoc?.name || "Therapy";
+
+    if (kind === "SUB") {
+      const sid = String(doc._id);
+      const baseKey = makeKey({ type: "THERAPY", itemId: tid, subItemId: sid });
+      const basePrice = toNum(doc?.price_per_session ?? doc?.pricePerSession, 0);
+
+      return {
+        source: "CUSTOM",
+        type: "THERAPY",
+        itemId: tid,
+        subItemId: sid,
+        baseKey,
+        rowId: makeRowId("c"),
+        displayName: `${therapyName} • ${doc?.name || "Sub-therapy"}`,
+        qty,
+        meta: {
+          basePrice,
+          slabs: doc?.discountSlabs || [],
+          durationMins: doc?.duration_mins ?? doc?.duration ?? null,
+        },
+      };
+    }
+
+ // TEST row
+const xid = String(doc._id);
+const baseKey = makeKey({ type: "TEST", itemId: xid, subItemId: null });
+const basePrice = toNum(doc?.price_per_test ?? doc?.pricePerTest, 0);
+
+return {
+  source: "CUSTOM",
+  type: "TEST",
+  itemId: xid,
+  subItemId: null,
+  baseKey,
+  rowId: makeRowId("c"),
+  displayName: `${doc?.name || "Test"} • (${therapyName})`,
+  qty: 1,
+  meta: { basePrice, slabs: [], therapyId: tid }, // ✅ ADD therapyId here
+};
+
+  };
+
+  const makeNewCustomRows = (rows) => {
+    setCustomAdds((prev) => [...(prev || []), ...(rows || [])]);
+    setSelectedRowIds((prev) => [...prev, ...(rows || []).map((r) => r.rowId)]);
+    setOverrides((prev) => {
+      const next = { ...prev };
+      for (const r of rows || []) next[r.rowId] = { qty: String(r.qty) };
+      return next;
+    });
+  };
+
+  // =====================
+  // Reuse selection from invoice (clone as new rows)
+  // =====================
+  const useFromInvoice = async (invoiceId) => {
+    if (!invoiceId) return;
+    try {
+      const { data } = await api.get(`/invoices/${invoiceId}`);
+      const items = Array.isArray(data?.current?.items) ? data.current.items : [];
+
+      const newRows = [];
+      for (const it of items) {
+        const baseKey = makeKey({ type: it.type, itemId: it.itemId, subItemId: it.subItemId });
+        const template = allSelectableItems.find((x) => x.baseKey === baseKey) || null;
+
+        const rowId = makeRowId("c");
+        newRows.push({
+          source: "INVOICE_CLONE",
+          type: it.type,
+          itemId: it.itemId,
+          subItemId: it.subItemId || null,
+          baseKey,
+          rowId,
+          displayName: template?.displayName || it?.name || "Item",
+          qty: clamp(toNum(it.qty, 1), 1, 999999),
+          meta: template?.meta || { basePrice: toNum(it.basePrice ?? it.unitPrice, 0), slabs: [] },
+        });
+      }
+
+      if (newRows.length) makeNewCustomRows(newRows);
+    } catch (e) {
+      console.error(e);
+      setErrorMsg("Failed to load invoice items for selection.");
+    }
+  };
+
+  // =====================
+  // Generate invoice (DIRECT)
+  // =====================
+  const generateInvoice = async () => {
+    setErrorMsg("");
+    if (!selectedCaseId) return setErrorMsg("Please select a case.");
+    if (!selectedItemsResolved.length) return setErrorMsg("Please tick at least 1 item.");
 
     try {
       setSaving(true);
-      const { data } = await api.put(`/cases/${selectedCaseId}/bill`, payload);
-      const updated = data?.updated;
-      alert(updated ? "✅ Bill updated successfully." : "✅ Bill created successfully.");
-      navigate(`/admin/case-details/${selectedCaseId}`);
-    } catch (err) {
-      console.error("Error saving bill:", err);
-      const msg =
-        err?.response?.data?.message ||
-        err?.response?.data?.error ||
-        "❌ Failed to save bill. Please try again.";
-      setErrorMsg(msg);
+
+      const itemsPayload = selectedItemsResolved.map((it) => ({
+        type: it.type,
+        itemId: it.itemId,
+        subItemId: it.subItemId || null,
+        name: it.displayName,
+        qty: it.qty,
+        unitPrice: it.unitNet,
+        discountPercent: it.discountPct,
+        basePrice: it.basePrice,
+        clientRowId: it.rowId,
+        baseKey: it.baseKey,
+
+        
+  // ✅ important for TEST item_code
+  therapyId: it.type === "TEST" ? it?.meta?.therapyId : undefined,
+      }));
+
+      const res = await api.post(`/cases/${selectedCaseId}/invoices`, {
+        taxRate: 0,
+        items: itemsPayload,
+        summary: { ...summary, currency: "INR" },
+      });
+
+      const data = res.data;
+      const invoiceId = data?.invoiceId || data?._id;
+
+      // refresh invoices + billedMap
+      await fetchInvoices(selectedCaseId);
+      await hydrateBilledMap(selectedCaseId, (x) => makeKey(x));
+
+      // ✅ clear draft after success (so old selections don't stick)
+      try {
+        await api.delete(`/cases/${selectedCaseId}/billing-draft`);
+      } catch {}
+
+      // reset UI draft state (optional)
+      setSelectedRowIds([]);
+      setOverrides({});
+      setCustomAdds([]);
+      setHiddenBaseKeys([]);
+
+      if (invoiceId) {
+        navigate(`/admin/bill-details/${invoiceId}`, { state: { caseId: selectedCaseId } });
+      } else {
+        alert("✅ Invoice generated.");
+      }
+    } catch (e) {
+      console.error(e);
+      setErrorMsg(e?.response?.data?.message || "❌ Failed to generate invoice.");
     } finally {
       setSaving(false);
     }
   };
 
-  // ------- UI (Plan Snapshot) -------
-  const PlanBlock = ({ blk }) => {
-    const subs = Array.isArray(blk?.subTherapy) ? blk.subTherapy : [];
-    const tests = Array.isArray(blk?.tests) ? blk.tests : [];
-
-    return (
-      <div className="border rounded-lg p-4 bg-white shadow-sm border-indigo-100">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="font-semibold text-indigo-700 text-lg">
-            {blk?.therapy_name || "Therapy"}
-          </div>
-          <div className="text-xs text-gray-600 flex gap-2">
-            <span>Snapshot: {toInputDate(blk?.snapshot_at) || "—"}</span>
-            <span>•</span>
-            <span>Updated: {toInputDate(blk?.updatedAt) || "—"}</span>
-          </div>
-        </div>
-
-        {/* Sub-therapies snapshot */}
-        <div className="mt-3">
-          <p className="text-xs uppercase tracking-wide text-gray-500">Sub-Therapies</p>
-          <div className="mt-2 overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-600 border-b">
-                  <th className="py-2 pr-4">Name</th>
-                  <th className="py-2 pr-4">Duration</th>
-                  <th className="py-2 pr-4">Per Session ✓</th>
-                  <th className="py-2 pr-4">Per Package ✓</th>
-                  <th className="py-2 pr-4">Package Count</th>
-                  <th className="py-2 pr-4">Total Sessions</th>
-                  <th className="py-2 pr-4">Rate Used (per session)</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {subs.length ? (
-                  subs.map((s, i) => {
-                    const perSession = !!s?.flags?.pricePerSession;
-                    const perPackage = !!s?.flags?.pricePerPackage;
-
-                    const sessionsPerPackage = toMin1(s?.default_sessions_per_package || 1);
-                    const sessionsCount = toMin1(s?.sessions_count || 1);
-                    const packagesCount = toMin1(s?.packages_count || 1);
-
-                    const totalSessions = perSession
-                      ? sessionsCount
-                      : perPackage
-                      ? packagesCount * sessionsPerPackage
-                      : 0;
-
-                    const rateUsed = perSession
-                      ? Number(s?.price_per_session || 0)
-                      : perPackage
-                      ? Number(s?.price_per_package || 0) / sessionsPerPackage
-                      : 0;
-
-                    return (
-                      <tr key={`${s?.subTherapyId || i}`} className="border-b last:border-b-0">
-                        <td className="py-2 pr-4">{s?.name || "—"}</td>
-                        <td className="py-2 pr-4">{fmtMins(s?.duration_mins)}</td>
-
-                        <td className="py-2 pr-4">
-                          {perSession ? (
-                            <span className="text-xs px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              ✓
-                            </span>
-                          ) : (
-                            <span className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700 border border-gray-200">
-                              —
-                            </span>
-                          )}
-                        </td>
-
-                        <td className="py-2 pr-4">
-                          {perPackage ? (
-                            <span className="text-xs px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              ✓
-                            </span>
-                          ) : (
-                            <span className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700 border border-gray-200">
-                              —
-                            </span>
-                          )}
-                        </td>
-
-                        <td className="py-2 pr-4">
-                          {perPackage ? (
-                            <span className="font-semibold">{packagesCount}</span>
-                          ) : (
-                            <span className="text-gray-500">—</span>
-                          )}
-                        </td>
-
-                        <td className="py-2 pr-4">
-                          {totalSessions ? (
-                            <span className="font-semibold">{totalSessions}</span>
-                          ) : (
-                            <span className="text-gray-500">—</span>
-                          )}
-                        </td>
-
-                        <td className="py-2 pr-4">{inr(rateUsed)}</td>
-                      </tr>
-                    );
-                  })
-                ) : (
-                  <tr>
-                    <td className="py-3 text-gray-500" colSpan={7}>
-                      No sub-therapies selected.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-
-            {!!subs.length && (
-              <div className="mt-2 text-xs text-gray-500">
-                Note: For <b>Per Package</b>, total sessions = (packages_count × sessions_per_package) and rate used is
-                (package_price ÷ sessions_per_package) so total amount remains correct.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Tests snapshot */}
-        <div className="mt-5">
-          <div className="flex items-center gap-2">
-            <p className="text-xs uppercase tracking-wide text-gray-500">Tests</p>
-            <span
-              className={`text-xs px-2 py-1 rounded ${
-                blk?.therapyTestsEnabled
-                  ? "bg-emerald-50 text-emerald-700"
-                  : "bg-gray-100 text-gray-700"
-              }`}
-            >
-              {blk?.therapyTestsEnabled ? "Enabled" : "Disabled"}
-            </span>
-          </div>
-
-          {blk?.therapyTestsEnabled ? (
-            <div className="mt-2 overflow-x-auto">
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="text-left text-gray-600 border-b">
-                    <th className="py-2 pr-4">Name</th>
-                    <th className="py-2 pr-4">Duration</th>
-                    <th className="py-2 pr-4">Price / Test</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tests.length ? (
-                    tests.map((t, i) => (
-                      <tr key={`${t?.testId || i}`} className="border-b last:border-b-0">
-                        <td className="py-2 pr-4">{t?.name || "—"}</td>
-                        <td className="py-2 pr-4">{fmtMins(t?.duration_mins)}</td>
-                        <td className="py-2 pr-4">{inr(t?.price_per_test)}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td className="py-3 text-gray-500" colSpan={3}>
-                        Tests are enabled, but none were selected.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="text-sm text-gray-500 mt-1">Tests not enabled for this therapy.</div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  const disableAllEdits = billEditLocked || selectedCaseIsLocked;
-
+  // =====================
+  // UI
+  // =====================
   return (
-    <div className="min-h-screen w-full py-10 px-4 sm:px-8">
-      <div className="max-w-6xl mx-auto bg-white/95 backdrop-blur shadow-2xl rounded-xl p-6 sm:p-8 border border-indigo-200">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
-          <h2 className="text-3xl font-bold text-indigo-700">
-            🧾 {existingBill ? "Update Bill" : "Generate Bill"}
-          </h2>
-          <div className="text-sm text-gray-500">
-            {selectedCaseId ? (
-              <span>
-                For{" "}
-                <span className="font-semibold text-gray-700">
-                  {caseDetail?.patient_name ||
-                    selectedCaseBrief?.patient_name ||
-                    selectedCaseBrief?.p_id}
-                </span>{" "}
-                (Case #{selectedCaseId})
-              </span>
-            ) : (
-              <span>Select a case</span>
-            )}
-          </div>
+    <div className="min-h-screen w-full px-4 py-8 sm:px-10 bg-gradient-to-b from-slate-50 to-white">
+      <div className="max-w-7xl mx-auto">
+        <div className="text-center mb-6">
+          <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-slate-900">
+            Generate Bill / Create Invoice
+          </h1>
+          <div className="mt-2 text-sm text-slate-500">Direct Generate ✅ (Draft saved on server)</div>
         </div>
 
-        {errorMsg && (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-red-700">
+        {errorMsg ? (
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-red-700">
             {errorMsg}
           </div>
-        )}
+        ) : null}
 
-        {selectedCaseIsLocked && (
-          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800 text-sm">
-            Paid/Partial bill case selected — bill editing not allowed. Please select another case.
-          </div>
-        )}
+        {/* Controls */}
+        <div className="rounded-2xl border border-slate-200 bg-white shadow-sm p-4 sm:p-5">
+          <div className="flex flex-col lg:flex-row lg:items-center gap-3">
+            <div className="flex-1">
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="text-sm font-semibold text-slate-700 min-w-[92px]">Select Case</div>
 
-        {billEditLocked && (
-          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800 text-sm">
-            This bill is Paid/Partial — you don&apos;t have permission to edit it.
-          </div>
-        )}
+                <div className="flex-1 min-w-[240px]">
+                  <input
+                    type="text"
+                    value={caseSearch}
+                    onChange={(e) => setCaseSearch(e.target.value)}
+                    placeholder="Search by patient name, phone..."
+                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-400"
+                  />
+                </div>
 
-        {/* Case selection + bill meta */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-          {/* Case selection */}
-          <div className="lg:col-span-1 bg-gray-50 border rounded-xl p-4">
-            <label className="text-sm text-gray-600 mb-2 block">Select Case</label>
+                <div className="flex-1 min-w-[260px]">
+                  <select
+                    disabled={casesLoading || !!casesError}
+                    value={selectedCaseId}
+                    onChange={(e) => setSelectedCaseId(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-400"
+                  >
+                    <option value="" disabled>
+                      {casesLoading ? "Loading cases..." : "Choose a case"}
+                    </option>
+                    {cases.map((c) => (
+                      <option key={c._id} value={c._id}>
+                        {c.patient_name} • {c.p_id || "—"}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
 
-            <input
-              type="text"
-              value={caseSearch}
-              onChange={(e) => setCaseSearch(e.target.value)}
-              placeholder="Search by name, phone..."
-              className="w-full mb-2 rounded-md border p-2"
-            />
+              {casesError ? <div className="mt-2 text-xs text-red-600">{casesError}</div> : null}
 
-            <select
-              disabled={casesLoading || !!casesError}
-              value={selectedCaseId}
-              onChange={(e) => setSelectedCaseId(e.target.value)}
-              className="w-full rounded-md border p-2"
-            >
-              <option value="" disabled>
-                {casesLoading ? "Loading cases..." : "Choose a case"}
-              </option>
+              {selectedCaseId ? (
+                <div className="mt-2 text-xs text-slate-500 flex items-center gap-3 flex-wrap">
+                  <span>
+                    Patient:{" "}
+                    <span className="font-semibold text-slate-800">
+                      {caseDetail?.patient_name ||
+                        selectedCaseBrief?.patient_name ||
+                        selectedCaseBrief?.p_id ||
+                        "—"}
+                    </span>
+                  </span>
 
-              {selectedCaseId && caseLockMap?.[selectedCaseId]?.locked && (
-                <option value={selectedCaseId} disabled>
-                  (Locked: Paid/Partial) • {selectedCaseBrief?.patient_name || "Selected Case"}
-                </option>
-              )}
+                  <Link
+                    to={`/admin/case-details/${selectedCaseId}`}
+                    className="text-indigo-600 underline"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    View Case Details
+                  </Link>
 
-              {selectableCases.map((c) => (
-                <option key={c._id} value={c._id}>
-                  {c.patient_name} • {c.p_id || "—"}
-                </option>
-              ))}
-            </select>
+                  <span className="text-slate-300">|</span>
 
-            <div className="mt-3 text-xs text-gray-500">
-              ✅ Paid/Partial bill cases are hidden from selection.
-              {locksLoading ? (
-                <span className="ml-2 text-[11px] text-gray-400">Checking bills…</span>
+                  <select
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                    disabled={!invoices?.length}
+                    onChange={(e) => useFromInvoice(e.target.value)}
+                    defaultValue=""
+                    title="Reuse from invoice (creates NEW rows)"
+                  >
+                    <option value="" disabled>
+                      Reuse from invoice…
+                    </option>
+                    {(invoices || []).map((inv) => (
+                      <option key={inv.invoiceId} value={inv.invoiceId}>
+                        {inv.invoiceNumber} (v{inv.currentVersionNo})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               ) : null}
             </div>
 
-            <div className="mt-2 text-xs text-gray-500">
-              Items auto-generate from Therapy Plan snapshot (Total Sessions based).
+            {/* Buttons */}
+            <div className="flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={openAddModal}
+                disabled={!selectedCaseId}
+                className={`px-5 py-3 rounded-xl border font-semibold ${
+                  selectedCaseId
+                    ? "border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                    : "border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed"
+                }`}
+              >
+                Add
+              </button>
+
+              <button
+                type="button"
+                onClick={() => selectedCaseId && navigate(ROUTE_ALL_INVOICES(selectedCaseId))}
+                disabled={!selectedCaseId}
+                className={`px-5 py-3 rounded-xl border font-semibold ${
+                  selectedCaseId
+                    ? "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                    : "border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed"
+                }`}
+              >
+                All Invoices
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Table */}
+        <div className="mt-5 rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b bg-gradient-to-r from-white to-slate-50 flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <div className="font-bold text-slate-900">Items for selected case</div>
+              <div className="text-xs text-slate-500">Remove allowed only if Not billed</div>
             </div>
 
-            {selectedCaseId && (
-              <p className="text-xs mt-2">
-                <Link
-                  to={`/admin/case-details/${selectedCaseId}`}
-                  className="text-indigo-600 underline"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  View Case Details
-                </Link>
-              </p>
-            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={selectAll}
+                className="px-3 py-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 text-sm"
+                disabled={!allSelectableItems.length}
+              >
+                Select All
+              </button>
+              <button
+                type="button"
+                onClick={clearAll}
+                className="px-3 py-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 text-sm"
+                disabled={!selectedRowIds.length}
+              >
+                Clear
+              </button>
+            </div>
           </div>
 
-          {/* Bill & Due dates + totals */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 lg:col-span-2">
-            <div className="flex flex-col">
-              <label className="text-sm text-gray-600 mb-1">Bill Date</label>
-              <input
-                type="date"
-                value={billDate}
-                onChange={(e) => setBillDate(e.target.value)}
-                className="rounded-lg border p-2"
-                disabled={disableAllEdits}
-              />
-            </div>
+          <div className="px-5 py-3 text-xs text-slate-500">
+            {caseDetailLoading ? "Loading case…" : caseDetailError ? caseDetailError : null}
+            {invoicesLoading ? " • Loading invoices…" : null}
+          </div>
 
-            <div className="flex flex-col">
-              <label className="text-sm text-gray-600 mb-1">Due Date (optional)</label>
-              <input
-                type="date"
-                value={dueDate}
-                onChange={(e) => setDueDate(e.target.value)}
-                className="rounded-lg border p-2"
-                disabled={disableAllEdits}
-              />
-            </div>
+          {!allSelectableItems.length ? (
+            <div className="px-5 pb-6 text-slate-600">No items found.</div>
+          ) : (
+            <ItemsTable
+              items={allSelectableItems}
+              selectedRowIds={selectedRowIds}
+              overrides={overrides}
+              onToggleRow={toggleRow}
+              onQtyChange={onQtyChange}
+              billedMap={billedMap}
+              onRemoveRow={removeRow}
+              onDuplicateRow={duplicateRow}
+            />
+          )}
+        </div>
 
-            <div className="md:col-span-2 bg-gray-50 border rounded-xl p-4">
-              <div className="flex items-center justify-between py-1">
-                <span className="text-gray-600">Subtotal</span>
-                <span className="font-semibold">₹ {subtotal.toFixed(2)}</span>
-              </div>
+        {/* Summary + Generate */}
+        <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+          <div className="lg:col-span-2 rounded-2xl border border-slate-200 bg-white shadow-sm p-5">
+            <div className="font-bold text-slate-900 mb-3">Summary</div>
 
-              {/* ✅ UPDATED: TAX supports % or ₹ */}
-              <div className="flex items-center justify-between py-1">
-                <div className="text-gray-600 flex items-center gap-2 flex-wrap">
-                  <span>Tax</span>
-
-                  <select
-                    value={taxMode}
-                    onChange={(e) => setTaxMode(e.target.value)}
-                    className="rounded-md border p-1"
-                    disabled={disableAllEdits}
-                    title="Choose tax input type"
-                  >
-                    <option value="percent">%</option>
-                    <option value="amount">₹</option>
-                  </select>
-
-                  {taxMode === "percent" ? (
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={taxPercent}
-                      onChange={(e) => onTaxPercentChange(e.target.value)}
-                      className="w-28 rounded-md border p-1"
-                      disabled={disableAllEdits}
-                      placeholder="%"
-                    />
-                  ) : (
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={taxValue}
-                      onChange={(e) => onTaxValueChange(e.target.value)}
-                      className="w-28 rounded-md border p-1"
-                      disabled={disableAllEdits}
-                      placeholder="₹"
-                    />
-                  )}
-
-                  <span className="text-xs text-gray-500">
-                    {taxMode === "percent"
-                      ? `= ₹ ${taxAmount.toFixed(2)}`
-                      : subtotal > 0
-                      ? `≈ ${toNum(taxPercent).toFixed(2)}%`
-                      : "—"}
-                  </span>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="rounded-xl border border-slate-200 p-4 bg-slate-50/50">
+                <div className="text-xs text-slate-500">Selected Rows</div>
+                <div className="text-2xl font-extrabold text-slate-900 mt-1">
+                  {selectedItemsResolved.length}
                 </div>
-
-                <span className="font-semibold">₹ {taxAmount.toFixed(2)}</span>
               </div>
 
-              {/* ✅ UPDATED: DISCOUNT supports % or ₹ */}
-              <div className="flex items-center justify-between py-1">
-                <div className="text-gray-600 flex items-center gap-2 flex-wrap">
-                  <span>Discount</span>
-
-                  <select
-                    value={discountMode}
-                    onChange={(e) => setDiscountMode(e.target.value)}
-                    className="rounded-md border p-1"
-                    disabled={disableAllEdits}
-                    title="Choose discount input type"
-                  >
-                    <option value="percent">%</option>
-                    <option value="amount">₹</option>
-                  </select>
-
-                  {discountMode === "percent" ? (
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={discountPercent}
-                      onChange={(e) => onDiscountPercentChange(e.target.value)}
-                      className="w-28 rounded-md border p-1"
-                      disabled={disableAllEdits}
-                      placeholder="%"
-                    />
-                  ) : (
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={discountValue}
-                      onChange={(e) => onDiscountValueChange(e.target.value)}
-                      className="w-28 rounded-md border p-1"
-                      disabled={disableAllEdits}
-                      placeholder="₹"
-                    />
-                  )}
-
-                  <span className="text-xs text-gray-500">
-                    {discountMode === "percent"
-                      ? `= ₹ ${discountAmount.toFixed(2)}`
-                      : subtotal > 0
-                      ? `≈ ${toNum(discountPercent).toFixed(2)}%`
-                      : "—"}
-                  </span>
+              <div className="rounded-xl border border-slate-200 p-4 bg-slate-50/50">
+                <div className="text-xs text-slate-500">Total discount</div>
+                <div className="text-2xl font-extrabold text-amber-700 mt-1">
+                  {inr(summary.totalDiscount)}
                 </div>
-
-                <span className="font-semibold">- ₹ {discountAmount.toFixed(2)}</span>
               </div>
 
-              <div className="h-px bg-gray-200 my-2" />
-
-              <div className="flex items-center justify-between py-1 text-lg">
-                <span className="font-semibold text-gray-800">Grand Total</span>
-                <span className="font-bold text-indigo-700">₹ {grandTotal.toFixed(2)}</span>
+              <div className="rounded-xl border border-slate-200 p-4 bg-slate-50/50">
+                <div className="text-xs text-slate-500">Total amount overall</div>
+                <div className="text-2xl font-extrabold text-indigo-700 mt-1">
+                  {inr(summary.totalNet)}
+                </div>
               </div>
-
-              {existingBill && (
-                <p className="text-xs text-amber-700 mt-2">
-                  Note: If payments already exist on this bill, the server can block lowering the total below amount paid.
-                </p>
-              )}
             </div>
           </div>
-        </div>
 
-        {/* Plan Snapshot */}
-        <div className="mb-6">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-indigo-800">Therapy Plan Snapshot</h3>
-            <button
-              type="button"
-              onClick={() => setShowPlanDetails((v) => !v)}
-              className="text-sm text-indigo-600 underline"
-            >
-              {showPlanDetails ? "Hide" : "Show"}
-            </button>
-          </div>
-
-          {caseDetailLoading ? (
-            <div className="text-gray-600 mt-2">Loading plan…</div>
-          ) : caseDetailError ? (
-            <div className="text-red-600 mt-2">{caseDetailError}</div>
-          ) : !caseDetail?.therapy_plan?.length ? (
-            <div className="text-gray-600 mt-2">No plan snapshot on this case.</div>
-          ) : showPlanDetails ? (
-            <div className="space-y-4 mt-3">
-              {caseDetail.therapy_plan.map((blk, i) => (
-                <PlanBlock key={`${blk?.therapyId || i}`} blk={blk} />
-              ))}
+          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm p-5 flex flex-col justify-between">
+            <div className="text-sm text-slate-600">
+              <div className="font-semibold text-slate-900 mb-1">Action</div>
+              <div className="text-xs text-slate-500">Direct invoice create on Generate</div>
             </div>
-          ) : null}
-        </div>
 
-        {/* Notes */}
-        <div className="mb-6">
-          <label className="text-sm text-gray-600 mb-1 block">Notes (optional)</label>
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            rows={4}
-            placeholder="Add payment terms, additional info, etc."
-            className="w-full rounded-lg border p-3"
-            disabled={disableAllEdits}
-          />
-        </div>
-
-        {/* Actions */}
-        <div className="flex items-center justify-end gap-3">
-          <button
-            type="button"
-            className="px-4 py-2 rounded-lg border text-gray-700 hover:bg-gray-50"
-            onClick={() => navigate(-1)}
-          >
-            ← Back
-          </button>
-
-          <button
-            type="button"
-            disabled={saving || billLoading || disableAllEdits}
-            onClick={submitBill}
-            className={`px-5 py-2 rounded-lg shadow text-white ${
-              saving || billLoading || disableAllEdits
-                ? "bg-gray-400"
-                : "bg-green-600 hover:bg-green-700"
-            }`}
-            title={
-              disableAllEdits
-                ? "Paid/Partial bill cases are not editable"
-                : existingBill
-                ? "Update Bill"
-                : "Generate Bill"
-            }
-          >
-            {saving ? "Saving..." : existingBill ? "Update Bill" : "Generate Bill"}
-          </button>
+            <div className="mt-4 flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={generateInvoice}
+                disabled={saving || !selectedItemsResolved.length || !selectedCaseId}
+                className={`w-full px-6 py-3 rounded-xl font-extrabold text-white shadow ${
+                  saving || !selectedItemsResolved.length || !selectedCaseId
+                    ? "bg-slate-400 cursor-not-allowed"
+                    : "bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-700 hover:to-green-700"
+                }`}
+              >
+                {saving ? "Generating..." : "Generate"}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
+
+      {/* Add Items Modal */}
+      <AddItemsModal
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+  api={api}                     // ✅
+  caseId={selectedCaseId}        // ✅
+  onItemsAdded={async () => {    // ✅ refresh case
+    await fetchCaseDetail(selectedCaseId);
+    // (optional) plan me new therapy aaya to catalog pre-load will run via effect
+  }}
+        
+        therapyList={therapyList}
+        therapyLoading={therapyLoading}
+        catalogs={catalogs}
+        catalogLoading={catalogLoading}
+        loadCatalogForTherapy={loadCatalogForTherapy}
+        makeNewCustomRows={makeNewCustomRows}
+        makeRowFromCatalog={makeRowFromCatalog}
+      />
     </div>
   );
 }

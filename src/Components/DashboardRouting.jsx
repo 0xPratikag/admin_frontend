@@ -9,8 +9,6 @@ import ViewAllCase from "./Cases/ViewAllCase";
 import OnlinePayment from "./Payment/OnlinePayment";
 import OfflinePayment from "./Payment/OfflinePayment";
 import CaseDetail from "./Cases/CaseDetail";
-import ViewBill from "./Bill/ViewBill";
-import ViewBillDetails from "./Bill/ViewBillDetails";
 import TransactionList from "./Payment/TransactionList";
 import TransactionDetails from "./Payment/TransactionDetails";
 import InvitePage from "./Invite/InvitePage";
@@ -20,6 +18,7 @@ import TherapyCatalog from "./TherapyCatalog/TherapyCatalog";
 import ScheduledSession from "./Session/ScheduledSession";
 import AssignmentManager from "./AssignmentManager/AssignmentManager";
 import AssignmentList from "./AssignmentManager/AssignmentList";
+
 
 const Forbidden = () => (
   <div className="p-6">
@@ -50,6 +49,7 @@ const PERM_KEY_MAP = {
   GET_CASES: "view_case",
   DELETE_CASE: "view_case",
 
+  // ✅ Billing
   BILLING: "billing",
   BILLING_VIEW: "view_bill",
   BILL_CASE_GET: "generate_bill",
@@ -57,6 +57,14 @@ const PERM_KEY_MAP = {
   BILL_LIST: "view_bill",
   BILL_VIEW: "view_bill",
   BILL_CREATE_LEGACY: "generate_bill",
+
+  // ✅ NEW granular invoice/line-items permissions (from your new backend keys)
+  GET_LINE_ITEMS: "active_line_items",
+  POST_LINE_ITEM: "generate_bill", // add items is part of generate flow
+  GET_CASE_INVOICES: "invoices",
+  POST_INVOICE: "generate_bill",
+  GET_INVOICE_BY_ID: "view_bill",
+  GET_INVOICE_DOWNLOAD_BY_ID: "view_bill",
 
   PAYMENT: "payment",
   PAYMENT_ONLINE: "online_payment",
@@ -111,32 +119,40 @@ const DashboardRouting = () => {
       })
     )
   );
-  // 
 
   const ROUTES = [
     { path: "/admin/dashboard", element: <DashboardBase />, key: "dashboard" },
 
+    // ✅ optional alias routes under /admin/billing/... for consistency
+    { path: "/admin/billing/generate-bill", element: <GenerateBill />, key: "generate_bill" },
+    { path: "/admin/billing/generate-bill/:caseId", element: <GenerateBill />, key: "generate_bill" },
+
+    { path: "/admin/generate-bill", element: <GenerateBill />, key: "generate_bill" },
+    { path: "/admin/generate-bill/:caseId", element: <GenerateBill />, key: "generate_bill" },
+
+    // Cases
     { path: "/admin/create-cases", element: <CreateCase />, key: "create_case" },
     { path: "/admin/view-cases", element: <ViewAllCase />, key: "view_case" },
     { path: "/admin/edit-case/:caseId", element: <CreateCase />, key: "create_case" },
     { path: "/admin/case-details/:caseId", element: <CaseDetail />, key: "view_case" },
 
-    { path: "/admin/view-bill", element: <ViewBill />, key: "view_bill" },
-    { path: "/admin/bill-details/:id", element: <ViewBillDetails />, key: "view_bill" },
-    { path: "/admin/generate-bill", element: <GenerateBill />, key: "generate_bill" },
-
+    // Payments
     { path: "/admin/onlinepayment", element: <OnlinePayment />, key: "online_payment" },
     { path: "/admin/offlinepayment", element: <OfflinePayment />, key: "offline_payment" },
     { path: "/admin/txnList", element: <TransactionList />, key: "transactions" },
     { path: "/admin/transaction-details/:id", element: <TransactionDetails />, key: "transactions" },
 
+    // Members
     { path: "/admin/Invite", element: <InvitePage />, key: "add_members" },
 
+    // Schedule
     { path: "/admin/meetingManager", element: <MeetingManager />, key: "schedule_online" },
     { path: "/admin/scheduledSessions", element: <ScheduledSession />, key: "schedule_sessions" },
 
+    // Catalog
     { path: "/admin/therapy-catalog", element: <TherapyCatalog />, key: "therapy_catalog" },
 
+    // Assignments
     { path: "/admin/assignments", element: <AssignmentManager />, key: "assignment_manager" },
     { path: "/admin/assignment_manager_List", element: <AssignmentList />, key: "assignment_manager_List" },
 
@@ -154,10 +170,9 @@ const DashboardRouting = () => {
   }
 
   return (
-    <div className="min-h-screen w-full   bg-slate-50 ">
+    <div className="min-h-screen w-full bg-slate-50">
       <Sidebar isCollapsed={isCollapsed} setIsCollapsed={setIsCollapsed} />
 
-      {/* ✅ IMPORTANT: fixed sidebar => use padding-left (pl) not margin-left (ml) */}
       <main
         className={`min-h-screen w-full box-border transition-all duration-300
           ${isCollapsed ? "lg:pl-16" : "lg:pl-64"}`}

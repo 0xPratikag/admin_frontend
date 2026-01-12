@@ -10,8 +10,6 @@ import {
   CreditCard,
   FileCheck2,
   ClipboardList,
-  Users,
-  Calendar,
   Menu,
   X,
   LogOut,
@@ -20,8 +18,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { useSelector } from "react-redux";
 
 /**
- * Same mapping: permission CODES → internal access keys
- * Keep this in sync with DashboardRouting.
+ * Keep this mapping in sync with DashboardRouting.
  */
 const PERM_KEY_MAP = {
   // ===== Dashboard =====
@@ -36,10 +33,8 @@ const PERM_KEY_MAP = {
   DELETE_CATALOG_THERAPY: "therapy_catalog",
   TOGGLE_CATALOG_THERAPY: "therapy_catalog",
 
-
   // ******** assignment_manager ****
-
-    assignment_manager: "assignment_manager",
+  assignment_manager: "assignment_manager",
   assignment_manager_List: "assignment_manager_List",
 
   // ===== Cases =====
@@ -54,7 +49,7 @@ const PERM_KEY_MAP = {
   GET_CASES: "view_case",
   DELETE_CASE: "view_case",
 
-  // ===== Billing (menu + granular) =====
+  // ===== Billing =====
   BILLING: "billing",
   BILLING_VIEW: "view_bill",
   BILL_CASE_GET: "generate_bill",
@@ -63,22 +58,27 @@ const PERM_KEY_MAP = {
   BILL_VIEW: "view_bill",
   BILL_CREATE_LEGACY: "generate_bill",
 
-  // ===== Payments (old module) =====
+  // ✅ NEW granular invoice/line-items permissions
+  GET_LINE_ITEMS: "active_line_items",
+  POST_LINE_ITEM: "generate_bill",
+  GET_CASE_INVOICES: "invoices",
+  POST_INVOICE: "generate_bill",
+  GET_INVOICE_BY_ID: "view_bill",
+  GET_INVOICE_DOWNLOAD_BY_ID: "view_bill",
+
+  // ===== Payments =====
   PAYMENT: "payment",
   PAYMENT_ONLINE: "online_payment",
   PAYMENT_OFFLINE: "offline_payment",
   PAYMENT_TRANSACTIONS: "transactions",
 
-  // ===== Payments (new billing-specific) =====
   BILL_PAYMENT_OFFLINE: "offline_payment",
   BILL_PAYMENT_ONLINE_INITIATE: "online_payment",
   BILL_PAYMENT_ONLINE_VERIFY: "online_payment",
 
-  // ===== Transactions =====
   TXN_LIST: "transactions",
   TXN_VIEW: "transactions",
 
-  // ===== Invoices =====
   BILL_INVOICE_BY_TRANSACTION: "transactions",
   BILL_INVOICE_BY_CASE: "view_bill",
   BILL_FINAL_INVOICE_BY_BILL: "view_bill",
@@ -111,7 +111,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
     (state) => state.modules || {}
   );
 
-  // 🔹 Branch name localStorage se le lo (branch dashboard ke liye)
   useEffect(() => {
     try {
       const userRaw = localStorage.getItem("user");
@@ -123,33 +122,25 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
     } catch (e) {}
   }, []);
 
-  // 🔥 modules object → flat permissions list
   const flatPermissions = Object.values(modulesObj || {}).reduce(
     (acc, arr) => acc.concat(arr || []),
     []
   );
 
-  // codes → internal keys (with fallback on name slug)
   const normalizedAccess = Array.from(
     new Set(
       flatPermissions.flatMap((perm) => {
         const code = perm?.code || "";
         const name = perm?.name || "";
 
-        if (code && PERM_KEY_MAP[code]) {
-          return [PERM_KEY_MAP[code]];
-        }
-
-        if (name) {
-          return [name.toLowerCase().replace(/\s+/g, "_")];
-        }
-
+        if (code && PERM_KEY_MAP[code]) return [PERM_KEY_MAP[code]];
+        if (name) return [name.toLowerCase().replace(/\s+/g, "_")];
         return [];
       })
     )
   );
 
-  // Single source of truth for sidebar structure
+  // ✅ IMPORTANT: parent paths should NOT be "/admin/" (warna always active)
   const allModules = [
     {
       key: "dashboard",
@@ -158,11 +149,10 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
       icon: <LayoutDashboard className="w-5 h-5" />,
     },
 
-
     {
       key: "cases",
       name: "Cases",
-      path: "/admin/",
+      path: "/admin/view-cases",
       icon: <Stethoscope className="w-5 h-5" />,
       children: [
         {
@@ -180,60 +170,46 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
       ],
     },
 
-    // {
-    //   key: "assignments",
-    //   name: "Assignments",
-    //   path: "/admin/",
-    //   icon: <ClipboardList className="w-5 h-5" />,
-    //   children: [
-    //     {
-    //       key: "assignment_manager",
-    //       name: "Manage Assignments",
-    //       path: "/admin/assignments",
-    //       icon: <ClipboardList className="w-4 h-4" />,
-    //     },
-    //     {
-    //       key: "assignment_manager_List",
-    //       name: "Assignments List",
-    //       path: "/admin/assignment_manager_List",
-    //       icon: <ClipboardList className="w-4 h-4" />,
-    //     },
-    //   ],
-    // },
-
+    // ✅ Billing expanded
     {
       key: "billing",
       name: "Billing",
-      path: "/admin/",
+      path: "/admin/billing/generate-bill",
       icon: <ReceiptText className="w-5 h-5" />,
       children: [
         {
           key: "generate_bill",
           name: "Generate Bill",
-          path: "/admin/generate-bill",
+          path: "/admin/billing/generate-bill",
           icon: <FilePlus className="w-4 h-4" />,
         },
-        {
-          key: "view_bill",
-          name: "View Bill",
-          path: "/admin/view-bill",
-          icon: <CreditCard className="w-4 h-4" />,
-        },
+        // {
+        //   key: "view_bill",
+        //   name: "View Bill",
+        //   path: "/admin/billing/view-bill",
+        //   icon: <CreditCard className="w-4 h-4" />,
+        // },
+        // {
+        //   key: "active_line_items",
+        //   name: "Active Line Items",
+        //   path: "/admin/billing/active-line-items",
+        //   icon: <ClipboardList className="w-4 h-4" />,
+        // },
+        // {
+        //   key: "invoices",
+        //   name: "Invoices",
+        //   path: "/admin/billing/invoices",
+        //   icon: <FileCheck2 className="w-4 h-4" />,
+        // },
       ],
     },
 
     {
       key: "payment",
       name: "Payment",
-      path: "/admin/",
+      path: "/admin/offlinepayment",
       icon: <Banknote className="w-5 h-5" />,
       children: [
-        // {
-        //   key: "online_payment",
-        //   name: "Online",
-        //   path: "/admin/onlinepayment",
-        //   icon: <CreditCard className="w-4 h-4" />,
-        // },
         {
           key: "offline_payment",
           name: "Offline",
@@ -248,54 +224,12 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
         },
       ],
     },
-
-    // {
-    //   key: "members",
-    //   name: "Members",
-    //   path: "/admin/",
-    //   icon: <Users className="w-5 h-5" />,
-    //   children: [
-    //     {
-    //       key: "add_members",
-    //       name: "Invite Member",
-    //       path: "/admin/Invite",
-    //       icon: <Users className="w-4 h-4" />,
-    //     },
-    //   ],
-    // },
-
-    // {
-    //   key: "schedule",
-    //   name: "Schedule",
-    //   path: "/admin/",
-    //   icon: <Calendar className="w-5 h-5" />,
-    //   children: [
-    //     {
-    //       key: "schedule_sessions",
-    //       name: "Session",
-    //       path: "/admin/scheduledSessions",
-    //       icon: <Calendar className="w-4 h-4" />,
-    //     },
-    //     {
-    //       key: "schedule_online",
-    //       name: "Schedule Meeting",
-    //       path: "/admin/meetingManager",
-    //       icon: <Calendar className="w-4 h-4" />,
-    //     },
-    //     {
-    //       key: "all_scheduled",
-    //       name: "All Scheduled",
-    //       path: "/admin/all-scheduledList",
-    //       icon: <ClipboardList className="w-4 h-4" />,
-    //     },
-    //   ],
-    // },
   ];
 
-  // Parent visible if parent OR any child is allowed
   const filteredModules = allModules
     .map((mod) => {
       const parentAllowed = normalizedAccess.includes(mod.key);
+
       if (mod.children?.length) {
         const children = mod.children.filter((c) =>
           normalizedAccess.includes(c.key)
@@ -303,6 +237,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
         const showParent = parentAllowed || children.length > 0;
         return showParent ? { ...mod, children } : null;
       }
+
       return parentAllowed ? mod : null;
     })
     .filter(Boolean);
@@ -340,7 +275,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
           bg-white border-r border-gray-200 shadow-lg`}
       >
         <div className="relative h-full overflow-hidden">
-          {/* Toggle */}
           <button
             onClick={toggleCollapse}
             className="absolute top-4 right-4 z-10 p-1.5 rounded-md
@@ -356,7 +290,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
             scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent
             ${isCollapsed ? "px-2" : "px-4"}`}
           >
-            {/* Header */}
             <div
               className={`mb-8 text-center transition-all duration-300 ${
                 isCollapsed ? "mb-6" : "mb-8"
@@ -391,7 +324,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
               )}
             </div>
 
-            {/* Navigation */}
             <nav className="space-y-1">
               {filteredModules.map((mod) => {
                 const active = isActive(mod.path);
@@ -403,6 +335,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
                     key={mod.name}
                     onMouseEnter={() => setActiveHover(mod.name)}
                     onMouseLeave={() => setActiveHover(null)}
+                    className="relative"
                   >
                     <button
                       onClick={() =>
@@ -433,6 +366,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
                           <span className="font-medium text-sm">{mod.name}</span>
                         )}
                       </div>
+
                       {mod.children?.length && !isCollapsed && (
                         <span
                           className={`transition-transform duration-200 ${
@@ -447,10 +381,9 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
                       )}
                     </button>
 
-                    {/* Tooltip collapsed */}
                     {isCollapsed && isHovered && (
                       <div
-                        className="absolute left-16 bg-gray-900 text-white px-2 py-1 rounded-md 
+                        className="absolute left-16 top-2 bg-gray-900 text-white px-2 py-1 rounded-md 
                         shadow-lg z-50 pointer-events-none text-xs whitespace-nowrap
                         animate-in fade-in-0 slide-in-from-left-1 duration-150"
                       >
@@ -462,7 +395,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
                       </div>
                     )}
 
-                    {/* Children */}
                     {mod.children?.length && !isCollapsed && (
                       <div
                         className={`ml-8 mt-1 space-y-1 overflow-hidden 
@@ -505,7 +437,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
               })}
             </nav>
 
-            {/* Logout */}
             {canLogout && (
               <div className={`mt-auto ${isCollapsed ? "px-2" : "px-4"} mb-4`}>
                 <button
