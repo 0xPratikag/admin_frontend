@@ -30,6 +30,83 @@ function matchText(hay, needle) {
   return String(hay || "").toLowerCase().includes(String(needle || "").toLowerCase());
 }
 
+/** ✅ Simple modal (no extra deps) */
+function NoInvoiceModal({ open, onClose, onGenerate, patientName }) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+
+      {/* Dialog */}
+      <div className="relative w-full max-w-lg rounded-3xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
+        {/* Header */}
+        <div className="px-6 py-5 border-b bg-gradient-to-r from-indigo-600 to-blue-600 text-white">
+          <div className="text-xs opacity-90">Invoice Required</div>
+          <div className="text-2xl font-extrabold tracking-tight">No Invoice Found</div>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-5">
+          <div className="flex gap-3">
+            <div className="mt-1 h-10 w-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center">
+              <span className="text-indigo-700 text-lg">📄</span>
+            </div>
+
+            <div className="flex-1">
+              <div className="text-slate-900 font-bold">
+                This case doesn’t have an invoice yet.
+              </div>
+              <div className="mt-1 text-sm text-slate-600 leading-relaxed">
+                {patientName ? (
+                  <>
+                    It looks like <span className="font-semibold">{patientName}</span> hasn’t been billed for this case.
+                  </>
+                ) : (
+                  <>It looks like billing hasn’t been created for this case.</>
+                )}
+                {" "}
+                Please generate an invoice first to view and manage payments.
+              </div>
+
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                <div className="font-semibold text-slate-900">What you can do next</div>
+                <ul className="mt-2 list-disc pl-5 space-y-1">
+                  <li>Create an invoice for selected therapies/tests</li>
+                  <li>Apply discounts and tax</li>
+                  <li>Download PDF and record payments</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="mt-6 flex flex-col sm:flex-row gap-2 justify-end">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50 font-semibold text-slate-700"
+            >
+              Not now
+            </button>
+
+            <button
+              onClick={onGenerate}
+              className="px-5 py-2 rounded-2xl font-extrabold text-white shadow-lg bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-700 hover:to-green-700"
+            >
+              Generate Invoice
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function InvoicesSection() {
   const api = useMemo(() => axios.create(buildAxios()), []);
   const navigate = useNavigate();
@@ -48,6 +125,9 @@ export default function InvoicesSection() {
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+
+  // ✅ modal state
+  const [showNoInvoiceModal, setShowNoInvoiceModal] = useState(false);
 
   // filters
   const [q, setQ] = useState("");
@@ -91,6 +171,9 @@ export default function InvoicesSection() {
 
   // load invoices for selected case
   useEffect(() => {
+    // close modal when case changes
+    setShowNoInvoiceModal(false);
+
     if (!selectedCaseId) {
       setInvoices([]);
       return;
@@ -108,8 +191,14 @@ export default function InvoicesSection() {
           ? res.data
           : [];
         if (!alive) return;
+
         setInvoices(rows);
         setPage(1);
+
+        // ✅ if none → show modal
+        if (!rows || rows.length === 0) {
+          setShowNoInvoiceModal(true);
+        }
       } catch (e) {
         if (!alive) return;
         setInvoices([]);
@@ -200,16 +289,30 @@ export default function InvoicesSection() {
     setSearchParams(next, { replace: true });
   };
 
+  const onGenerateInvoice = () => {
+    if (!selectedCaseId) return;
+    setShowNoInvoiceModal(false);
+    navigate(`/admin/billing/generate-bill/${selectedCaseId}`);
+  };
+
   return (
     <div className="min-h-screen w-full px-4 py-8 sm:px-10 bg-gradient-to-b from-slate-50 to-white">
+      {/* ✅ Modal */}
+      <NoInvoiceModal
+        open={showNoInvoiceModal && !!selectedCaseId && !loading && !err}
+        onClose={() => setShowNoInvoiceModal(false)}
+        onGenerate={onGenerateInvoice}
+        patientName={selectedCase?.patient_name || ""}
+      />
+
       <div className="max-w-7xl mx-auto">
-        {/* Header (Generate Bill button removed) */}
+        {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
           <div>
             <div className="text-sm text-slate-500">Billing</div>
             <h1 className="text-4xl font-extrabold tracking-tight text-slate-900">Invoices</h1>
             <div className="mt-1 text-sm text-slate-600">
-              Case select karo → invoices list + filters. Click invoice → details.
+              Select a case → view invoices → open invoice to see details.
             </div>
           </div>
         </div>
@@ -258,9 +361,26 @@ export default function InvoicesSection() {
                     Patient: <span className="font-semibold text-slate-800">{selectedCase.patient_name}</span>
                   </span>
                   <span className="text-slate-300">|</span>
-                  <Link className="text-indigo-600 underline" to={`/admin/case-details/${selectedCaseId}`} target="_blank">
+                  <Link
+                    className="text-indigo-600 underline"
+                    to={`/admin/case-details/${selectedCaseId}`}
+                    target="_blank"
+                  >
                     View case
                   </Link>
+
+                  {/* ✅ Helpful quick action (optional) */}
+                  {invoices.length === 0 && !loading ? (
+                    <>
+                      <span className="text-slate-300">|</span>
+                      <button
+                        onClick={() => setShowNoInvoiceModal(true)}
+                        className="text-emerald-700 font-semibold underline"
+                      >
+                        Generate invoice
+                      </button>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -381,7 +501,17 @@ export default function InvoicesSection() {
           ) : loading ? (
             <div className="p-6 text-slate-600">Loading invoices…</div>
           ) : !filtered.length ? (
-            <div className="p-6 text-slate-600">No invoices found for current filters.</div>
+            <div className="p-6 text-slate-600">
+              No invoices found for current filters.
+              <div className="mt-3">
+                <button
+                  onClick={() => setShowNoInvoiceModal(true)}
+                  className="px-4 py-2 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 font-semibold text-emerald-700"
+                >
+                  Generate Invoice
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">
