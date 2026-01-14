@@ -2,7 +2,6 @@ import React, { useEffect, useState, useMemo, useCallback, useRef } from "react"
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 
-// ✅ 3rd party tooltip (fixes hover css + overflow clipping)
 import Tippy from "@tippyjs/react";
 import "tippy.js/dist/tippy.css";
 import "tippy.js/themes/light-border.css";
@@ -30,7 +29,6 @@ function isValidDateString(s) {
   return d.toString() !== "Invalid Date";
 }
 
-// Age (years) from dob
 function calcAgeFromDob(dobStr) {
   if (!isValidDateString(dobStr)) return "";
   const dob = new Date(dobStr);
@@ -42,7 +40,6 @@ function calcAgeFromDob(dobStr) {
   return String(age);
 }
 
-// DOB from age (approx): sets year = todayYear - age, month/day = today
 function calcDobFromAge(ageVal) {
   const a = Number(ageVal);
   if (!Number.isFinite(a) || a < 0) return "";
@@ -55,7 +52,6 @@ function calcDobFromAge(ageVal) {
 }
 
 // -------- Discount helpers --------
-// discountSlabs: [{min_sessions,max_sessions,discount_percent,isActive}]
 function computeDiscountPercent(discountSlabs, sessionsCount) {
   const n = Number(sessionsCount);
   if (!Number.isFinite(n) || n < 1) return 0;
@@ -70,11 +66,9 @@ function computeDiscountPercent(discountSlabs, sessionsCount) {
     }))
     .filter((x) => Number.isFinite(x.min) && Number.isFinite(x.max) && Number.isFinite(x.pct));
 
-  // find matching slabs
   const matches = slabs.filter((s) => n >= s.min && n <= s.max);
   if (!matches.length) return 0;
 
-  // choose best match: highest min
   matches.sort((a, b) => b.min - a.min);
   const pct = matches[0].pct;
   if (!Number.isFinite(pct) || pct < 0) return 0;
@@ -86,10 +80,15 @@ function formatSlabs(discountSlabs) {
   const active = discountSlabs.filter((x) => x && x.isActive !== false);
   if (!active.length) return "No active slabs";
   const sorted = [...active].sort((a, b) => Number(a.min_sessions || 0) - Number(b.min_sessions || 0));
-  return sorted
-    .map((s) => `${s.min_sessions}-${s.max_sessions}: ${s.discount_percent}%`)
-    .join(", ");
+  return sorted.map((s) => `${s.min_sessions}-${s.max_sessions}: ${s.discount_percent}%`).join(", ");
 }
+
+// ---- numeric client_id helper ----
+const toPositiveInt = (v) => {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return n;
+};
 
 export default function CreateCase() {
   const { caseId } = useParams();
@@ -101,18 +100,17 @@ export default function CreateCase() {
     []
   );
 
-  // track last field user edited (to prevent DOB<->Age loop)
-  const lastEditedRef = useRef(null); // "dob" | "age" | null
+  const lastEditedRef = useRef(null);
 
   const [formData, setFormData] = useState({
-    p_id: "",
+    client_id: "",
     patient_name: "",
     patient_phone: "",
     patient_phone_alt: "",
     gender: "",
     dob: "",
     age: "",
-    joining_date: "", // set default below
+    joining_date: "",
     grant_app_access: false,
     address: {
       line1: "",
@@ -135,25 +133,7 @@ export default function CreateCase() {
     },
   });
 
-  /**
-   * ✅ NEW Therapy Plan payload format (frontend) — table based:
-   * therapy_plan: [
-   *  {
-   *    therapyId,
-   *    subTherapy: [
-   *      {
-   *        subTherapyId,
-   *        sessions_count,
-   *        discount_percent, // auto from slabs
-   *        start_date,       // default today
-   *        end_date
-   *      }
-   *    ],
-   *    therapyTestsEnabled,
-   *    tests: [{ testId }]
-   *  }
-   * ]
-   */
+  // ✅ Therapy Plan builder state (still used for selecting items)
   const [therapyPlan, setTherapyPlan] = useState([]);
   const [therapyList, setTherapyList] = useState([]);
   const [therapyLoading, setTherapyLoading] = useState(false);
@@ -164,22 +144,21 @@ export default function CreateCase() {
   // Conditions chip input
   const [conditionInput, setConditionInput] = useState("");
 
-  // Client ID verify UI state
-  const [pidStatus, setPidStatus] = useState({ state: "idle", msg: "" });
+  // Client ID verify state
+  const [clientIdStatus, setClientIdStatus] = useState({ state: "idle", msg: "", data: null });
+
+  const [existingItems, setExistingItems] = useState([]); // update mode: existing line items from backend
 
   const [errors, setErrors] = useState({});
   const [loading, setLoading] = useState(!!caseId);
   const [success, setSuccess] = useState("");
   const [error, setError] = useState("");
 
-  // ---------- set default joining date (create mode) ----------
+  // default joining date
   useEffect(() => {
     if (!isUpdate) {
       const todayStr = todayISO();
-      setFormData((p) => ({
-        ...p,
-        joining_date: p.joining_date || todayStr, // default today only if empty
-      }));
+      setFormData((p) => ({ ...p, joining_date: p.joining_date || todayStr }));
     }
   }, [isUpdate]);
 
@@ -208,7 +187,6 @@ export default function CreateCase() {
       try {
         setCatalogLoading((p) => ({ ...p, [key]: true }));
         const [subs, tests] = await Promise.all([
-          // ✅ note: your backend path used here is /subtherapies (as per your code)
           api.get(`/therapies/${therapyId}/subtherapies`, {
             headers: authHeaders,
             params: { isActive: true, limit: 1000 },
@@ -221,10 +199,7 @@ export default function CreateCase() {
 
         setCatalogs((p) => ({
           ...p,
-          [key]: {
-            subtherapies: subs?.data?.items || [],
-            tests: tests?.data?.items || [],
-          },
+          [key]: { subtherapies: subs?.data?.items || [], tests: tests?.data?.items || [] },
         }));
       } catch (e) {
         console.error(e);
@@ -235,76 +210,75 @@ export default function CreateCase() {
     [authHeaders, catalogs]
   );
 
-  // ---------- init ----------
   useEffect(() => {
     fetchTherapies();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---------- fetch case (update mode) ----------
+  // ---------- fetch case + items (update mode) ----------
   useEffect(() => {
     const fetchCase = async () => {
       try {
-        const res = await api.get(`/view-case/${caseId}`, { headers: authHeaders });
-        const c = res.data || {};
+        const res = await api.get(`/cases/${caseId}`, { headers: authHeaders });
+        const c = res.data?.data || res.data || {};
 
-        // Build plan (supports legacy flags too)
-        const planFromSnapshot = Array.isArray(c.therapy_plan)
-          ? c.therapy_plan.map((t) => ({
-              therapyId: String(t.therapyId),
-              subTherapy: Array.isArray(t.subTherapy)
-                ? t.subTherapy
-                    .map((s) => {
-                      const sid = String(s.subTherapyId);
+        // also fetch line items (explicit) to support delete diff
+        const itemsRes = await api.get(`/cases/${caseId}/line-items`, { headers: authHeaders });
+        const lineItems = itemsRes.data?.data || [];
+        setExistingItems(Array.isArray(lineItems) ? lineItems : []);
 
-                      // legacy compatibility:
-                      const legacyPerSession = !!s?.flags?.pricePerSession || !!s?.pricePerSession;
+        // build therapyPlan from CaseItems (SUB/TEST)
+        const byTherapy = new Map(); // tid -> blk
+        for (const it of lineItems) {
+          const tid = String(it.therapyId);
+          if (!byTherapy.has(tid)) {
+            byTherapy.set(tid, {
+              therapyId: tid,
+              therapy_name: it.therapy_name || "",
+              subTherapy: [],
+              therapyTestsEnabled: false,
+              tests: [],
+            });
+          }
+          const blk = byTherapy.get(tid);
 
-                      const sessions_count_raw =
-                        s?.sessions_count ??
-                        s?.sessionsCount ??
-                        s?.qty ??
-                        (legacyPerSession ? 1 : undefined);
+          if (it.item_type === "SUB") {
+            blk.subTherapy.push({
+              subTherapyId: String(it.subTherapyId),
+              sessions_count: Number(it.sessions_count || 1),
+              discount_percent: Number(it.discount_percent || 0),
+              start_date: it.start_date ? String(it.start_date).split("T")[0] : todayISO(),
+              end_date: it.end_date ? String(it.end_date).split("T")[0] : "",
+            });
+          }
 
-                      const sessions_count =
-                        Number.isFinite(Number(sessions_count_raw)) && Number(sessions_count_raw) > 0
-                          ? Number(sessions_count_raw)
-                          : undefined;
+          if (it.item_type === "TEST") {
+            blk.therapyTestsEnabled = true;
+            blk.tests.push({ testId: String(it.testId) });
+          }
+        }
 
-                      if (!sessions_count) return null; // not selected
+        const plan = [...byTherapy.values()].map((x) => ({
+          therapyId: x.therapyId,
+          subTherapy: x.subTherapy,
+          therapyTestsEnabled: x.therapyTestsEnabled,
+          tests: x.tests,
+        }));
 
-                      return {
-                        subTherapyId: sid,
-                        sessions_count,
-                        discount_percent:
-                          Number.isFinite(Number(s?.discount_percent)) && Number(s?.discount_percent) >= 0
-                            ? Number(s.discount_percent)
-                            : undefined,
-                        start_date: s?.start_date ? String(s.start_date).split("T")[0] : undefined,
-                        end_date: s?.end_date ? String(s.end_date).split("T")[0] : undefined,
-                      };
-                    })
-                    .filter(Boolean)
-                : [],
-              therapyTestsEnabled: !!t.therapyTestsEnabled,
-              tests: Array.isArray(t.tests) ? t.tests.map((x) => ({ testId: String(x.testId) })) : [],
-            }))
-          : [];
-
-        const uniqueTherapyIds = [...new Set(planFromSnapshot.map((t) => t.therapyId))];
+        const uniqueTherapyIds = [...new Set(plan.map((t) => t.therapyId))];
         await Promise.all(uniqueTherapyIds.map((tid) => loadCatalogForTherapy(tid)));
 
-        setTherapyPlan(planFromSnapshot);
+        setTherapyPlan(plan);
 
         setFormData({
-          p_id: c.p_id || "",
+          client_id: c.client_id ?? "",
           patient_name: c.patient_name || "",
           patient_phone: c.patient_phone || "",
           patient_phone_alt: c.patient_phone_alt || "",
           gender: c.gender || "",
-          dob: c.dob ? c.dob.split("T")[0] : "",
+          dob: c.dob ? String(c.dob).split("T")[0] : "",
           age: c.age ?? "",
-          joining_date: c.joining_date ? c.joining_date.split("T")[0] : "",
+          joining_date: c.joining_date ? String(c.joining_date).split("T")[0] : "",
           grant_app_access: !!c.grant_app_access,
           address:
             c.address || {
@@ -327,6 +301,11 @@ export default function CreateCase() {
             additional_info: c.other_details?.additional_info || "",
           },
         });
+
+        // update mode => client_id immutable, mark verified state as ok
+        if (c.client_id != null) {
+          setClientIdStatus({ state: "locked", msg: "Client ID is immutable", data: null });
+        }
       } catch (err) {
         console.error(err);
         setError("❌ Failed to load case data.");
@@ -336,9 +315,10 @@ export default function CreateCase() {
     };
 
     if (isUpdate) fetchCase();
+    else setLoading(false);
   }, [caseId, isUpdate, authHeaders, loadCatalogForTherapy]);
 
-  // ---------- normalize discounts & default start_date when catalogs load ----------
+  // normalize discounts & default start_date when catalogs load
   useEffect(() => {
     if (!therapyPlan.length) return;
 
@@ -361,7 +341,7 @@ export default function CreateCase() {
               Number.isFinite(Number(row.discount_percent)) && Number(row.discount_percent) >= 0
                 ? Number(row.discount_percent)
                 : computed,
-            start_date: row.start_date || todayISO(), // default today
+            start_date: row.start_date || todayISO(),
           };
         });
 
@@ -386,6 +366,12 @@ export default function CreateCase() {
     const nextErrors = {};
     const get = (obj, path) => path.split(".").reduce((o, k) => (o ? o[k] : undefined), obj);
 
+    // client_id required for create mode
+    if (!isUpdate) {
+      const cid = toPositiveInt(data.client_id);
+      if (!cid) nextErrors["client_id"] = "client_id must be a positive integer (1,2,3..).";
+    }
+
     REQUIRED_FIELDS.forEach((key) => {
       const v = get(data, key);
       if (v === undefined || v === null || String(v).trim() === "") {
@@ -402,6 +388,20 @@ export default function CreateCase() {
       const join = new Date(data.joining_date);
       if (dob.toString() !== "Invalid Date" && join.toString() !== "Invalid Date" && join < dob) {
         nextErrors["joining_date"] = "Joining date cannot be before D.O.B.";
+      }
+    }
+
+    // validate subtherapy end_date >= start_date (frontend)
+    for (const blk of therapyPlan) {
+      for (const s of blk.subTherapy || []) {
+        if (s.start_date && s.end_date) {
+          const a = new Date(s.start_date);
+          const b = new Date(s.end_date);
+          if (a.toString() !== "Invalid Date" && b.toString() !== "Invalid Date" && b < a) {
+            nextErrors["therapy_plan"] = "Some sub-therapies have end_date before start_date.";
+            break;
+          }
+        }
       }
     }
 
@@ -425,20 +425,16 @@ export default function CreateCase() {
     clearError(name);
   };
 
-  // Client ID change
-  const handlePidChange = (e) => {
+  const handleClientIdChange = (e) => {
     const val = e.target.value;
-    setFormData((p) => ({ ...p, p_id: val }));
-    clearError("p_id");
-    setPidStatus({ state: "idle", msg: "" });
+    setFormData((p) => ({ ...p, client_id: val }));
+    clearError("client_id");
+    setClientIdStatus({ state: "idle", msg: "", data: null });
   };
 
   const handleAddressChange = (e) => {
     const k = e.target.name;
-    setFormData((p) => ({
-      ...p,
-      address: { ...p.address, [k]: e.target.value },
-    }));
+    setFormData((p) => ({ ...p, address: { ...p.address, [k]: e.target.value } }));
     clearError(`address.${k}`);
   };
 
@@ -460,25 +456,13 @@ export default function CreateCase() {
     }
   };
 
-  const handleMultiSelectChange = (e, key) => {
-    const { options } = e.target;
-    const selected = [];
-    for (let i = 0; i < options.length; i++) if (options[i].selected) selected.push(options[i].value);
-    setFormData((p) => ({ ...p, [key]: selected }));
-  };
-
-  // ✅ DOB → Age
   const handleDobChange = (e) => {
     const dob = e.target.value;
     lastEditedRef.current = "dob";
-    setFormData((p) => {
-      const nextAge = calcAgeFromDob(dob);
-      return { ...p, dob, age: nextAge };
-    });
+    setFormData((p) => ({ ...p, dob, age: calcAgeFromDob(dob) }));
     clearError("dob");
   };
 
-  // ✅ Age → DOB
   const handleAgeChange = (e) => {
     const age = e.target.value;
     lastEditedRef.current = "age";
@@ -490,7 +474,6 @@ export default function CreateCase() {
     clearError("age");
   };
 
-  // If case is loaded (update mode), ensure sync if only one exists
   useEffect(() => {
     setFormData((p) => {
       if (p.dob && p.age !== "" && p.age != null) return p;
@@ -521,10 +504,7 @@ export default function CreateCase() {
   };
 
   const removeCondition = (label) => {
-    setFormData((p) => ({
-      ...p,
-      conditions: p.conditions.filter((c) => c !== label),
-    }));
+    setFormData((p) => ({ ...p, conditions: p.conditions.filter((c) => c !== label) }));
   };
 
   const onConditionKeyDown = (e) => {
@@ -554,12 +534,10 @@ export default function CreateCase() {
     });
   };
 
-  // ✅ user types sessions qty -> select/updates row; blank -> clear selection
   const setSubTherapySessionsCount = (therapyId, subTherapyId, rawVal, subTherapyCatalogRow) => {
     const tid = String(therapyId);
     const sid = String(subTherapyId);
 
-    // if cleared
     if (rawVal === "" || rawVal === null || rawVal === undefined) {
       setTherapyPlan((prev) =>
         prev.map((blk) => {
@@ -576,7 +554,6 @@ export default function CreateCase() {
     setTherapyPlan((prev) =>
       prev.map((blk) => {
         if (String(blk.therapyId) !== tid) return blk;
-
         const exists = blk.subTherapy.find((s) => String(s.subTherapyId) === sid);
 
         if (!exists) {
@@ -584,13 +561,7 @@ export default function CreateCase() {
             ...blk,
             subTherapy: [
               ...blk.subTherapy,
-              {
-                subTherapyId: sid,
-                sessions_count: n,
-                discount_percent: disc,
-                start_date: todayISO(),
-                end_date: "",
-              },
+              { subTherapyId: sid, sessions_count: n, discount_percent: disc, start_date: todayISO(), end_date: "" },
             ],
           };
         }
@@ -599,12 +570,7 @@ export default function CreateCase() {
           ...blk,
           subTherapy: blk.subTherapy.map((s) =>
             String(s.subTherapyId) === sid
-              ? {
-                  ...s,
-                  sessions_count: n,
-                  discount_percent: disc,
-                  start_date: s.start_date || todayISO(),
-                }
+              ? { ...s, sessions_count: n, discount_percent: disc, start_date: s.start_date || todayISO() }
               : s
           ),
         };
@@ -624,9 +590,7 @@ export default function CreateCase() {
 
         return {
           ...blk,
-          subTherapy: blk.subTherapy.map((s) =>
-            String(s.subTherapyId) === sid ? { ...s, [field]: value } : s
-          ),
+          subTherapy: blk.subTherapy.map((s) => (String(s.subTherapyId) === sid ? { ...s, [field]: value } : s)),
         };
       })
     );
@@ -647,9 +611,7 @@ export default function CreateCase() {
     const tid = String(therapyId);
     loadCatalogForTherapy(tid);
     setTherapyPlan((prev) =>
-      prev.map((blk) =>
-        String(blk.therapyId) === tid ? { ...blk, therapyTestsEnabled: !blk.therapyTestsEnabled } : blk
-      )
+      prev.map((blk) => (String(blk.therapyId) === tid ? { ...blk, therapyTestsEnabled: !blk.therapyTestsEnabled } : blk))
     );
   };
 
@@ -686,31 +648,97 @@ export default function CreateCase() {
   const fieldCls = (key) => `${baseInputCls} ${errors[key] ? errorBorder : normalBorder}`;
   const ErrorText = ({ msg }) => (msg ? <p className="text-sm text-red-600 mt-1">{msg}</p> : null);
 
-  // ---------- Client ID verify call ----------
-  const verifyPid = async () => {
+  // ---------- client_id verify call ----------
+  const verifyClientId = async () => {
     try {
-      const val = String(formData.p_id || "");
-      if (!val) {
-        setPidStatus({ state: "invalid", msg: "Enter a Client ID to verify" });
+      const cid = toPositiveInt(formData.client_id);
+      if (!cid) {
+        setClientIdStatus({ state: "invalid", msg: "Enter a valid numeric Client ID (1,2,3..)", data: null });
         return;
       }
 
-      setPidStatus({ state: "checking", msg: "Checking..." });
+      setClientIdStatus({ state: "checking", msg: "Checking...", data: null });
 
-      const res = await api.get(`/cases/verify-pid`, {
-        headers: authHeaders,
-        params: { p_id: val },
-      });
+      const res = await api.get(`/cases/verify-client-id/${cid}`, { headers: authHeaders });
 
-      if (res.data?.available) {
-        setPidStatus({ state: "available", msg: "Available" });
+      // backend response: { ok:true, exists:boolean, data:doc|null }
+      if (res.data?.exists) {
+        const doc = res.data?.data;
+        setClientIdStatus({
+          state: "unavailable",
+          msg: `Client ID ${cid} already exists`,
+          data: doc || null,
+        });
       } else {
-        setPidStatus({ state: "unavailable", msg: res.data?.message || "Already in use" });
+        setClientIdStatus({ state: "available", msg: `Client ID ${cid} is available`, data: null });
       }
     } catch (err) {
-      const msg = err?.response?.data?.message || err?.response?.data?.error || "Verification failed";
-      setPidStatus({ state: "error", msg });
+      const msg = err?.response?.data?.message || "Verification failed";
+      setClientIdStatus({ state: "error", msg, data: null });
     }
+  };
+
+  // ---------- build line-items payload from therapyPlan ----------
+  const buildLineItemsPayload = () => {
+    const items = [];
+
+    for (const blk of therapyPlan) {
+      const tid = String(blk.therapyId);
+      const therapy_name = therapyNameById[tid] || blk.therapy_name || "Therapy";
+
+      const cat = catalogs[tid] || { subtherapies: [], tests: [] };
+      const subById = Object.fromEntries((cat.subtherapies || []).map((s) => [String(s._id), s]));
+      const testById = Object.fromEntries((cat.tests || []).map((t) => [String(t._id), t]));
+
+      // SUB
+      for (const s of blk.subTherapy || []) {
+        const sid = String(s.subTherapyId);
+        const row = subById[sid];
+
+        const price_per_session = Number(row?.price_per_session ?? row?.pricePerSession ?? 0) || 0;
+        const duration_mins = Number(row?.duration_mins ?? row?.duration ?? 0) || 0;
+
+        items.push({
+          item_type: "SUB",
+          therapyId: tid,
+          therapy_name,
+          subTherapyId: sid,
+          name: row?.name || row?.title || "Sub Therapy",
+          duration_mins: duration_mins || undefined,
+          price_per_session,
+          sessions_count: Math.max(1, Number(s.sessions_count || 1)),
+          start_date: s.start_date || todayISO(),
+          end_date: s.end_date || undefined,
+          discount_percent: Number.isFinite(Number(s.discount_percent)) ? Number(s.discount_percent) : 0,
+          discount: 0,
+        });
+      }
+
+      // TEST
+      if (blk.therapyTestsEnabled) {
+        for (const t of blk.tests || []) {
+          const xid = String(t.testId);
+          const row = testById[xid];
+
+          const price_per_test = Number(row?.price_per_test ?? row?.pricePerTest ?? 0) || 0;
+          const duration_mins = Number(row?.duration_mins ?? row?.duration ?? 0) || 0;
+
+          items.push({
+            item_type: "TEST",
+            therapyId: tid,
+            therapy_name,
+            testId: xid,
+            name: row?.name || row?.title || "Test",
+            duration_mins: duration_mins || undefined,
+            price_per_test,
+            discount_percent: 0,
+            discount: 0,
+          });
+        }
+      }
+    }
+
+    return { items };
   };
 
   // ---------- submit ----------
@@ -723,8 +751,7 @@ export default function CreateCase() {
     if (Object.keys(nextErrors).length > 0) {
       setErrors(nextErrors);
       const firstKey = Object.keys(nextErrors)[0];
-      const firstId = idFromKey(firstKey);
-      const el = document.getElementById(firstId);
+      const el = document.getElementById(idFromKey(firstKey));
       if (el) {
         el.focus();
         el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -732,16 +759,20 @@ export default function CreateCase() {
       return;
     }
 
-    if (!isUpdate && formData.p_id && pidStatus.state !== "available") {
-      setErrors((p) => ({ ...p, p_id: "Please click Verify and ensure the Client ID is available." }));
-      const el = document.getElementById(idFromKey("p_id"));
-      if (el) el.focus();
-      return;
+    // create mode => must verify available
+    if (!isUpdate) {
+      if (clientIdStatus.state !== "available") {
+        setErrors((p) => ({ ...p, client_id: "Please click Verify and ensure the Client ID is available." }));
+        const el = document.getElementById(idFromKey("client_id"));
+        if (el) el.focus();
+        return;
+      }
     }
 
     try {
-      const payload = {
-        p_id: formData.p_id ? String(formData.p_id) : undefined,
+      // 1) Case payload
+      const casePayload = {
+        client_id: isUpdate ? undefined : toPositiveInt(formData.client_id),
         patient_name: formData.patient_name,
         patient_phone: formData.patient_phone,
         patient_phone_alt: formData.patient_phone_alt,
@@ -756,34 +787,50 @@ export default function CreateCase() {
         therapies: formData.therapies || [],
         conditions: formData.conditions || [],
         other_details: formData.other_details || {},
-
-        // ✅ NEW payload as per table
-        therapy_plan: therapyPlan.map((t) => ({
-          therapyId: t.therapyId,
-          therapyTestsEnabled: !!t.therapyTestsEnabled,
-          tests: (t.tests || []).map((x) => ({ testId: x.testId })),
-          subTherapy: (t.subTherapy || []).map((s) => ({
-            subTherapyId: s.subTherapyId,
-            sessions_count: Math.max(1, Number(s.sessions_count || 1)),
-            discount_percent: Number.isFinite(Number(s.discount_percent)) ? Number(s.discount_percent) : 0,
-            start_date: s.start_date || todayISO(),
-            end_date: s.end_date || "",
-          })),
-        })),
       };
 
+      let savedCaseId = caseId;
+
+      // 2) Create / Update case
       if (isUpdate) {
-        await api.patch(`/update-case/${caseId}`, payload, { headers: authHeaders });
-        setSuccess("💾 Case updated successfully!");
-        navigate("/admin/view-cases");
+        await api.patch(`/cases/${caseId}`, casePayload, { headers: authHeaders });
       } else {
-        await api.post(`/create-cases`, payload, { headers: authHeaders });
-        setSuccess("✅ Case created successfully!");
-        navigate("/admin/view-cases");
+        const created = await api.post(`/cases`, casePayload, { headers: authHeaders });
+        const doc = created.data?.data || created.data;
+        savedCaseId = doc?._id;
       }
+
+      if (!savedCaseId) throw new Error("Case ID not found after save.");
+
+      // 3) Sync line items:
+      //    - update mode: delete items that are no longer selected
+      //    - then upsert selected items
+      const desiredPayload = buildLineItemsPayload();
+      const desiredKeys = new Set();
+
+      // derive desired item_code keys (must match backend logic)
+      for (const it of desiredPayload.items) {
+        if (it.item_type === "SUB") desiredKeys.add(`SUB|${it.therapyId}|${it.subTherapyId}`);
+        if (it.item_type === "TEST") desiredKeys.add(`TEST|${it.therapyId}|${it.testId}`);
+      }
+
+      if (isUpdate && Array.isArray(existingItems) && existingItems.length) {
+        const toRemove = existingItems.filter((x) => x?.status !== "removed" && !desiredKeys.has(String(x.item_code)));
+        for (const rm of toRemove) {
+          await api.delete(`/cases/${savedCaseId}/line-items/${rm._id}`, { headers: authHeaders });
+        }
+      }
+
+      // upsert current selection
+      if (desiredPayload.items.length) {
+        await api.post(`/cases/${savedCaseId}/line-items`, desiredPayload, { headers: authHeaders });
+      }
+
+      setSuccess(isUpdate ? "💾 Case updated successfully!" : "✅ Case created successfully!");
+      navigate("/admin/view-cases");
     } catch (err) {
       console.error(err);
-      setError(err?.response?.data?.error || "❌ Failed to submit form.");
+      setError(err?.response?.data?.message || err?.response?.data?.error || err?.message || "❌ Failed to submit form.");
     }
   };
 
@@ -808,27 +855,31 @@ export default function CreateCase() {
           {error && <div className="bg-red-50 border border-red-400 text-red-700 p-3 rounded">{error}</div>}
 
           <form onSubmit={handleSubmit} noValidate className="space-y-10">
-            {/* Patient Info */}
+            {/* Client Info */}
             <section className="space-y-4">
               <h2 className="text-xl font-semibold text-gray-800">👤 Client Details</h2>
 
-              {!isUpdate && (
+              {/* client_id */}
+              {!isUpdate ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="text-sm text-gray-700 mb-1 block">Client ID (optional, click Verify)</label>
+                    <label className="text-sm text-gray-700 mb-1 block">
+                      Client ID (numeric) <span className="text-red-600">*</span>
+                    </label>
                     <div className="flex gap-2">
                       <input
-                        id={idFromKey("p_id")}
-                        type="text"
-                        name="p_id"
-                        value={formData.p_id}
-                        onChange={handlePidChange}
-                        placeholder="Enter Client ID (e.g., 1, ABC123)"
-                        className={fieldCls("p_id")}
+                        id={idFromKey("client_id")}
+                        type="number"
+                        min="1"
+                        name="client_id"
+                        value={formData.client_id}
+                        onChange={handleClientIdChange}
+                        placeholder="Enter Client ID (e.g., 1,2,3...)"
+                        className={fieldCls("client_id")}
                       />
                       <button
                         type="button"
-                        onClick={verifyPid}
+                        onClick={verifyClientId}
                         className="whitespace-nowrap px-3 py-2 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-sm"
                       >
                         Verify
@@ -836,44 +887,43 @@ export default function CreateCase() {
                     </div>
 
                     <div className="mt-1 flex items-center gap-2">
-                      {pidStatus.state === "checking" && <span className="text-sm text-gray-600">Checking…</span>}
-                      {pidStatus.state === "available" && (
+                      {clientIdStatus.state === "checking" && <span className="text-sm text-gray-600">Checking…</span>}
+                      {clientIdStatus.state === "available" && (
                         <span className="text-xs px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
                           Available
                         </span>
                       )}
-                      {pidStatus.state === "unavailable" && (
+                      {clientIdStatus.state === "unavailable" && (
                         <span className="text-xs px-2 py-1 rounded-full bg-rose-100 text-rose-700 border border-rose-200">
-                          Not available
+                          Already used
                         </span>
                       )}
-                      {(pidStatus.state === "invalid" || pidStatus.state === "error") && (
-                        <span className="text-xs text-rose-600">{pidStatus.msg}</span>
+                      {(clientIdStatus.state === "invalid" || clientIdStatus.state === "error") && (
+                        <span className="text-xs text-rose-600">{clientIdStatus.msg}</span>
                       )}
                     </div>
 
-                    <p className="text-xs text-gray-500 mt-1">
-                      Client ID is a unique code for this client. Leave blank to auto-generate on the server.
-                    </p>
-                    <ErrorText msg={errors["p_id"]} />
+                    {clientIdStatus.state === "unavailable" && clientIdStatus.data ? (
+                      <div className="mt-2 text-xs text-gray-600">
+                        Exists: <b>{clientIdStatus.data.patient_name || "—"}</b> ·{" "}
+                        <code className="bg-gray-100 px-1 rounded">{clientIdStatus.data.case_uid || "—"}</code>
+                      </div>
+                    ) : null}
+
+                    <ErrorText msg={errors["client_id"]} />
                   </div>
                 </div>
-              )}
-
-              {isUpdate && (
+              ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="text-sm text-gray-700 mb-1 block">Client ID</label>
                     <input
-                      id={idFromKey("p_id")}
+                      id={idFromKey("client_id")}
                       type="text"
-                      name="p_id"
-                      value={formData.p_id}
+                      value={String(formData.client_id ?? "")}
                       readOnly
                       disabled
                       className={`${baseInputCls} ${normalBorder} bg-gray-100`}
-                      placeholder="Client ID"
-                      title="Unique Client ID (auto-generated)"
                     />
                   </div>
                   <div className="text-sm text-gray-600 flex items-end">Client ID is immutable after creation.</div>
@@ -1105,7 +1155,7 @@ export default function CreateCase() {
               />
             </section>
 
-            {/* Conditions chip input */}
+            {/* Conditions */}
             <section className="space-y-3">
               <h2 className="text-xl font-semibold text-gray-800">⚕️ Conditions (manual add or pick)</h2>
 
@@ -1169,15 +1219,13 @@ export default function CreateCase() {
               )}
             </section>
 
-            {/* Therapy Plan Builder */}
+            {/* Therapy Plan Builder -> CASE ITEMS */}
             <section className="space-y-4">
-              <h2 className="text-xl font-semibold text-gray-800">🩺 Therapy Plan (builder)</h2>
+              <h2 className="text-xl font-semibold text-gray-800">🧾 Case Items (Therapies / Tests)</h2>
               <p className="text-sm text-gray-600">
-                Add therapies, enter <b>Sessions Qty</b>. Discount auto-calculated by slabs. Start Date default today.
-                Hover “View” to see pricing + slabs.
+                Ye selection ab <b>CaseItem</b> me save hoti hai. Create/Update ke baad items auto upsert hota hai.
               </p>
 
-              {/* Add Therapy Row */}
               <div className="flex flex-col sm:flex-row gap-3 items-start">
                 <select
                   id="add_therapy_select"
@@ -1204,7 +1252,6 @@ export default function CreateCase() {
 
               <ErrorText msg={errors["therapy_plan"]} />
 
-              {/* Plan Blocks */}
               <div className="space-y-6">
                 {therapyPlan.map((blk, idx) => {
                   const tid = String(blk.therapyId);
@@ -1217,7 +1264,6 @@ export default function CreateCase() {
 
                   return (
                     <div key={`${tid}-${idx}`} className="border rounded-lg p-4">
-                      {/* Header */}
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <div className="font-semibold text-indigo-700">{therapyNameById[tid] || "Therapy"}</div>
                         <div className="flex items-center gap-3">
@@ -1260,20 +1306,17 @@ export default function CreateCase() {
 
                               const sessionsCount = existing?.sessions_count ?? "";
                               const discountPercent =
-                                existing?.discount_percent ??
-                                computeDiscountPercent(s.discountSlabs, Number(existing?.sessions_count || 0));
+                                existing?.discount_percent ?? computeDiscountPercent(s.discountSlabs, Number(existing?.sessions_count || 0));
 
                               const startDateVal = existing?.start_date || todayISO();
                               const endDateVal = existing?.end_date || "";
 
-                              // ✅ adapt to whatever keys backend sends (safe fallbacks)
                               const pricePerSessionVal = Number(s?.price_per_session ?? s?.pricePerSession ?? 0);
                               const durationMins = s?.duration_mins ?? s?.duration ?? null;
 
                               const tooltipContent = (
                                 <div className="w-[320px]">
                                   <div className="text-sm font-semibold text-gray-900 mb-2">{s.name} — Details</div>
-
                                   <div className="text-xs text-gray-700 space-y-1">
                                     <div className="flex justify-between gap-3">
                                       <span>Per Session</span>
@@ -1290,7 +1333,6 @@ export default function CreateCase() {
                                       <div className="text-[12px] text-gray-800">{formatSlabs(s.discountSlabs)}</div>
                                     </div>
                                   </div>
-
                                   <div className="mt-2 text-[11px] text-gray-500">
                                     Tip: Sessions qty change → discount auto updates.
                                   </div>
@@ -1301,12 +1343,9 @@ export default function CreateCase() {
                                 <tr key={sid} className="border-b last:border-b-0">
                                   <td className="py-2 pr-4">
                                     <div className="font-medium text-gray-900">{s.name}</div>
-                                    {!!durationMins && (
-                                      <div className="text-xs text-gray-500">Duration: {durationMins} mins</div>
-                                    )}
+                                    {!!durationMins && <div className="text-xs text-gray-500">Duration: {durationMins} mins</div>}
                                   </td>
 
-                                  {/* Sessions Qty */}
                                   <td className="py-2 pr-4">
                                     <input
                                       type="number"
@@ -1318,7 +1357,6 @@ export default function CreateCase() {
                                     />
                                   </td>
 
-                                  {/* Discount (disabled/readOnly) */}
                                   <td className="py-2 pr-4">
                                     <input
                                       type="number"
@@ -1330,7 +1368,6 @@ export default function CreateCase() {
                                     />
                                   </td>
 
-                                  {/* Start Date (default today) */}
                                   <td className="py-2 pr-4">
                                     <input
                                       type="date"
@@ -1340,11 +1377,9 @@ export default function CreateCase() {
                                       className={`border rounded px-2 py-1 w-40 focus:outline-none ${
                                         existing ? "focus:ring-2 focus:ring-indigo-500" : "bg-gray-100 text-gray-500"
                                       }`}
-                                      title={!existing ? "Enter Sessions Qty to enable" : "Start Date"}
                                     />
                                   </td>
 
-                                  {/* End Date */}
                                   <td className="py-2 pr-4">
                                     <input
                                       type="date"
@@ -1354,11 +1389,9 @@ export default function CreateCase() {
                                       className={`border rounded px-2 py-1 w-40 focus:outline-none ${
                                         existing ? "focus:ring-2 focus:ring-indigo-500" : "bg-gray-100 text-gray-500"
                                       }`}
-                                      title={!existing ? "Enter Sessions Qty to enable" : "End Date"}
                                     />
                                   </td>
 
-                                  {/* Tooltip details */}
                                   <td className="py-2 pr-4">
                                     <Tippy
                                       content={tooltipContent}
@@ -1378,14 +1411,12 @@ export default function CreateCase() {
                                     </Tippy>
                                   </td>
 
-                                  {/* Clear */}
                                   <td className="py-2 pr-4">
                                     {existing ? (
                                       <button
                                         type="button"
                                         onClick={() => clearSubTherapySelection(tid, sid)}
                                         className="text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50"
-                                        title="Clear selection"
                                       >
                                         Clear
                                       </button>
@@ -1406,12 +1437,6 @@ export default function CreateCase() {
                             )}
                           </tbody>
                         </table>
-
-                        {!!cat.subtherapies.length && (
-                          <div className="mt-2 text-xs text-gray-500">
-                            Note: Sessions Qty blank means not selected. Discount auto comes from slabs.
-                          </div>
-                        )}
                       </div>
 
                       {/* Tests */}

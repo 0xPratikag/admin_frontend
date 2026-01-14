@@ -1,14 +1,18 @@
-// src/pages/billing/billingHelpers.js
 import { clamp, round2, toNum } from "./_billingUtils";
 
 // =====================
-// Safe catalog readers
+// Safe response readers
 // =====================
 export const getItems = (resData) => {
   if (!resData) return [];
   if (Array.isArray(resData)) return resData;
+
+  // common server shapes
   if (Array.isArray(resData.items)) return resData.items;
   if (Array.isArray(resData.data)) return resData.data;
+  if (resData.ok && Array.isArray(resData.data)) return resData.data;
+  if (resData.ok && Array.isArray(resData.invoices)) return resData.invoices;
+
   return [];
 };
 

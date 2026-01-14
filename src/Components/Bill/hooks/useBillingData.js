@@ -1,9 +1,8 @@
-// src/pages/billing/hooks/useBillingData.js
 import { useCallback, useState } from "react";
 import { getItems } from "../billingHelpers";
 
 export default function useBillingData(api) {
-  // case selection
+  // cases
   const [cases, setCases] = useState([]);
   const [casesLoading, setCasesLoading] = useState(true);
   const [casesError, setCasesError] = useState("");
@@ -13,6 +12,11 @@ export default function useBillingData(api) {
   const [caseDetailLoading, setCaseDetailLoading] = useState(false);
   const [caseDetailError, setCaseDetailError] = useState("");
 
+  // line items
+  const [lineItems, setLineItems] = useState([]);
+  const [lineItemsLoading, setLineItemsLoading] = useState(false);
+  const [lineItemsError, setLineItemsError] = useState("");
+
   // invoices
   const [invoices, setInvoices] = useState([]);
   const [invoicesLoading, setInvoicesLoading] = useState(false);
@@ -20,21 +24,22 @@ export default function useBillingData(api) {
   // billed map
   const [billedMap, setBilledMap] = useState({});
 
-  // catalogs
-  const [catalogs, setCatalogs] = useState({}); // tid -> { subtherapies, tests }
-  const [catalogLoading, setCatalogLoading] = useState({}); // tid -> bool
-
+  // catalogs / therapies
+  const [catalogs, setCatalogs] = useState({});
+  const [catalogLoading, setCatalogLoading] = useState({});
   const [therapyList, setTherapyList] = useState([]);
   const [therapyLoading, setTherapyLoading] = useState(false);
 
+  // ---------------------
+  // CASES
+  // ---------------------
   const fetchCases = useCallback(
     async (q = "") => {
       setCasesLoading(true);
       setCasesError("");
       try {
-        const { data } = await api.get("/search-cases", { params: q ? { q } : undefined });
-        const list = Array.isArray(data) ? data : getItems(data);
-        setCases(list);
+        const { data } = await api.get("/cases", { params: q ? { q } : undefined });
+        setCases(getItems(data));
       } catch (e) {
         console.error(e);
         setCases([]);
@@ -52,16 +57,12 @@ export default function useBillingData(api) {
       setCaseDetailLoading(true);
       setCaseDetailError("");
       try {
-        const { data } = await api.get(`/view-case/${cid}`);
-        setCaseDetail(data || null);
+        const { data } = await api.get(`/cases/${cid}`);
+        setCaseDetail(data?.data || data || null);
       } catch (e) {
         console.error(e);
         setCaseDetail(null);
-        setCaseDetailError(
-          e?.response?.data?.error ||
-            e?.response?.data?.message ||
-            "Failed to load case detail."
-        );
+        setCaseDetailError(e?.response?.data?.message || "Failed to load case detail.");
       } finally {
         setCaseDetailLoading(false);
       }
@@ -69,13 +70,40 @@ export default function useBillingData(api) {
     [api]
   );
 
+  // ---------------------
+  // LINE ITEMS
+  // ---------------------
+  const fetchLineItems = useCallback(
+    async (cid, status = "active") => {
+      if (!cid) return;
+      setLineItemsLoading(true);
+      setLineItemsError("");
+      try {
+        const { data } = await api.get(`/cases/${cid}/line-items`, {
+          params: status ? { status } : undefined,
+        });
+        setLineItems(getItems(data));
+      } catch (e) {
+        console.error(e);
+        setLineItems([]);
+        setLineItemsError("Failed to load line items.");
+      } finally {
+        setLineItemsLoading(false);
+      }
+    },
+    [api]
+  );
+
+  // ---------------------
+  // INVOICES
+  // ---------------------
   const fetchInvoices = useCallback(
     async (cid) => {
       if (!cid) return;
       setInvoicesLoading(true);
       try {
         const { data } = await api.get(`/cases/${cid}/invoices`);
-        setInvoices(Array.isArray(data?.invoices) ? data.invoices : getItems(data));
+        setInvoices(getItems(data));
       } catch (e) {
         console.error(e);
         setInvoices([]);
@@ -87,58 +115,62 @@ export default function useBillingData(api) {
   );
 
   // invoice details -> billed map
-  const hydrateBilledMap = useCallback(
-    async (cid, makeBaseKey) => {
-      if (!cid) return;
-      try {
-        const { data } = await api.get(`/cases/${cid}/invoices`);
-        const list = Array.isArray(data?.invoices) ? data.invoices : getItems(data);
-        const top = list.slice(0, 60);
+// invoice details -> billed map (keyed by CaseItem _id / caseItemId)
+const hydrateBilledMap = useCallback(
+  async (cid) => {
+    if (!cid) return;
 
-        const details = await Promise.allSettled(
-          top.map((x) => api.get(`/invoices/${x.invoiceId}`).then((r) => r.data))
-        );
+    try {
+      const { data } = await api.get(`/cases/${cid}/invoices`);
+      const list = getItems(data).slice(0, 60);
 
-        const next = {};
-        for (const d of details) {
-          if (d.status !== "fulfilled") continue;
-          const inv = d.value;
+      const details = await Promise.allSettled(
+        list.map((x) => {
+          const invoiceId = x._id;
+          return api.get(`/invoices/${invoiceId}`);
+        })
+      );
 
-          const invNo = inv?.invoiceNumber || String(inv?.invoiceId || inv?._id || "");
-          const versions = [];
+      const next = {};
 
-          if (Array.isArray(inv?.current?.items)) versions.push(inv.current.items);
-          if (Array.isArray(inv?.history)) {
-            for (const h of inv.history) if (Array.isArray(h?.items)) versions.push(h.items);
-          }
+      for (const d of details) {
+        if (d.status !== "fulfilled") continue;
 
-          // count unique invoiceNumbers per baseKey
-          for (const items of versions) {
-            for (const it of items || []) {
-              const baseKey = makeBaseKey({
-                type: it.type,
-                itemId: it.itemId,
-                subItemId: it.subItemId,
-              });
+        // supports both: { ok:true, data: invoice } OR direct invoice
+        const payload = d.value?.data;
+        const inv = payload?.data || payload || null;
+        if (!inv) continue;
 
-              if (!next[baseKey]) next[baseKey] = { count: 0, invoiceNumbers: [] };
-              if (!next[baseKey].invoiceNumbers.includes(invNo)) {
-                next[baseKey].invoiceNumbers.push(invNo);
-                next[baseKey].count += 1;
-              }
-            }
+        const invNo = inv.invoice_uid || String(inv._id || "");
+
+        // your invoice schema has items directly
+        for (const it of inv.items || []) {
+          const key = String(it.caseItemId || "");
+          if (!key) continue;
+
+          if (!next[key]) next[key] = { count: 0, invoiceNumbers: [] };
+
+          if (!next[key].invoiceNumbers.includes(invNo)) {
+            next[key].invoiceNumbers.push(invNo);
+            next[key].count += 1;
           }
         }
-
-        setBilledMap(next);
-      } catch (e) {
-        console.error("hydrateBilledMap error", e);
-        setBilledMap({});
       }
-    },
-    [api]
-  );
 
+      setBilledMap(next);
+    } catch (e) {
+      console.error("hydrateBilledMap error", e);
+      setBilledMap({});
+    }
+  },
+  [api]
+);
+
+
+
+  // ---------------------
+  // Therapies / catalog
+  // ---------------------
   const fetchTherapies = useCallback(async () => {
     try {
       setTherapyLoading(true);
@@ -192,6 +224,11 @@ export default function useBillingData(api) {
     caseDetailLoading,
     caseDetailError,
     fetchCaseDetail,
+
+    lineItems,
+    lineItemsLoading,
+    lineItemsError,
+    fetchLineItems,
 
     invoices,
     invoicesLoading,

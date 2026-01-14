@@ -1,4 +1,3 @@
-// src/pages/billing/_billingUtils.js
 export const toInputDate = (iso) => {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -26,6 +25,7 @@ export function buildAxios() {
   return {
     baseURL: import.meta.env.VITE_API_BASE_URL,
     headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+    withCredentials: true,
   };
 }
 

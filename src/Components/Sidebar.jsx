@@ -6,8 +6,6 @@ import {
   Stethoscope,
   FilePlus,
   ReceiptText,
-  Banknote,
-  CreditCard,
   FileCheck2,
   ClipboardList,
   Menu,
@@ -19,6 +17,7 @@ import { useSelector } from "react-redux";
 
 /**
  * Keep this mapping in sync with DashboardRouting.
+ * IMPORTANT: All values must match ROUTES keys.
  */
 const PERM_KEY_MAP = {
   // ===== Dashboard =====
@@ -34,6 +33,10 @@ const PERM_KEY_MAP = {
   TOGGLE_CATALOG_THERAPY: "therapy_catalog",
 
   // ******** assignment_manager ****
+  ASSIGNMENT_MANAGER: "assignment_manager",
+  ASSIGNMENT_MANAGER_LIST: "assignment_manager_List",
+
+  // some older keys you had in map (safe)
   assignment_manager: "assignment_manager",
   assignment_manager_List: "assignment_manager_List",
 
@@ -58,27 +61,28 @@ const PERM_KEY_MAP = {
   BILL_VIEW: "view_bill",
   BILL_CREATE_LEGACY: "generate_bill",
 
-  // ✅ NEW granular invoice/line-items permissions
+  // ✅ NEW invoice/line-items permissions
   GET_LINE_ITEMS: "active_line_items",
   POST_LINE_ITEM: "generate_bill",
-  GET_CASE_INVOICES: "invoices",
   POST_INVOICE: "generate_bill",
-  GET_INVOICE_BY_ID: "view_bill",
-  GET_INVOICE_DOWNLOAD_BY_ID: "view_bill",
 
-  // ===== Payments =====
-  PAYMENT: "payment",
+  // ✅ Invoices
+  GET_CASE_INVOICES: "invoice_section",
+  GET_INVOICE_BY_ID: "invoice_details",
+  GET_INVOICE_DOWNLOAD_BY_ID: "invoice_details",
+
+  // ✅ Payments for invoice screen (you can tune this later)
+  BILL_PAYMENT_OFFLINE: "invoice_payment",
+  PAYMENT_OFFLINE: "invoice_payment",
+  PAYMENT: "invoice_payment",
+
+  // ===== Payments old module (keep as-is)
   PAYMENT_ONLINE: "online_payment",
-  PAYMENT_OFFLINE: "offline_payment",
   PAYMENT_TRANSACTIONS: "transactions",
-
-  BILL_PAYMENT_OFFLINE: "offline_payment",
   BILL_PAYMENT_ONLINE_INITIATE: "online_payment",
   BILL_PAYMENT_ONLINE_VERIFY: "online_payment",
-
   TXN_LIST: "transactions",
   TXN_VIEW: "transactions",
-
   BILL_INVOICE_BY_TRANSACTION: "transactions",
   BILL_INVOICE_BY_CASE: "view_bill",
   BILL_FINAL_INVOICE_BY_BILL: "view_bill",
@@ -132,7 +136,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
       flatPermissions.flatMap((perm) => {
         const code = perm?.code || "";
         const name = perm?.name || "";
-
         if (code && PERM_KEY_MAP[code]) return [PERM_KEY_MAP[code]];
         if (name) return [name.toLowerCase().replace(/\s+/g, "_")];
         return [];
@@ -140,7 +143,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
     )
   );
 
-  // ✅ IMPORTANT: parent paths should NOT be "/admin/" (warna always active)
   const allModules = [
     {
       key: "dashboard",
@@ -170,7 +172,6 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
       ],
     },
 
-    // ✅ Billing expanded
     {
       key: "billing",
       name: "Billing",
@@ -183,43 +184,10 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
           path: "/admin/billing/generate-bill",
           icon: <FilePlus className="w-4 h-4" />,
         },
-        // {
-        //   key: "view_bill",
-        //   name: "View Bill",
-        //   path: "/admin/billing/view-bill",
-        //   icon: <CreditCard className="w-4 h-4" />,
-        // },
-        // {
-        //   key: "active_line_items",
-        //   name: "Active Line Items",
-        //   path: "/admin/billing/active-line-items",
-        //   icon: <ClipboardList className="w-4 h-4" />,
-        // },
-        // {
-        //   key: "invoices",
-        //   name: "Invoices",
-        //   path: "/admin/billing/invoices",
-        //   icon: <FileCheck2 className="w-4 h-4" />,
-        // },
-      ],
-    },
-
-    {
-      key: "payment",
-      name: "Payment",
-      path: "/admin/offlinepayment",
-      icon: <Banknote className="w-5 h-5" />,
-      children: [
         {
-          key: "offline_payment",
-          name: "Offline",
-          path: "/admin/offlinepayment",
-          icon: <Banknote className="w-4 h-4" />,
-        },
-        {
-          key: "transactions",
-          name: "Transactions",
-          path: "/admin/txnList",
+          key: "invoice_section",
+          name: "Invoices",
+          path: "/admin/invoices",
           icon: <FileCheck2 className="w-4 h-4" />,
         },
       ],
@@ -243,6 +211,7 @@ const Sidebar = ({ isCollapsed = false, setIsCollapsed = () => {} }) => {
     .filter(Boolean);
 
   useEffect(() => {
+    setLoading(true);
     setTimeout(() => setLoading(false), 500);
   }, []);
 

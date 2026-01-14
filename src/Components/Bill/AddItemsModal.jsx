@@ -1,32 +1,30 @@
-// src/pages/billing/components/AddItemsModal.jsx
 import React, { useMemo, useState } from "react";
 import Tippy from "@tippyjs/react";
 import "tippy.js/dist/tippy.css";
 import "tippy.js/themes/light-border.css";
 
-import { toNum ,clamp, inr, round2} from "./_billingUtils";
-import { formatSlabs ,computeDiscountPercent } from "./billingHelpers";
-
+import { toNum, clamp, inr, round2 } from "./_billingUtils";
+import { computeDiscountPercent, formatSlabs } from "./billingHelpers";
 
 export default function AddItemsModal({
   open,
   onClose,
-    api,         // ✅ NEW
-  caseId,      // ✅ NEW
-  onItemsAdded,// ✅ NEW
+
+  api,
+  caseId,
+  onItemsAdded,
+
   therapyList,
   therapyLoading,
   catalogs,
   catalogLoading,
   loadCatalogForTherapy,
-  makeNewCustomRows, // (rows) => void
-  makeRowFromCatalog, // helper from parent
 }) {
   const [addError, setAddError] = useState("");
   const [saving, setSaving] = useState(false);
   const [therapyId, setTherapyId] = useState("");
-  const [subPick, setSubPick] = useState({}); // subId -> qty string
-  const [testPick, setTestPick] = useState({}); // testId -> bool
+  const [subPick, setSubPick] = useState({});
+  const [testPick, setTestPick] = useState({});
   const [testSearch, setTestSearch] = useState("");
 
   const cat = useMemo(() => {
@@ -44,8 +42,8 @@ export default function AddItemsModal({
 
     try {
       await loadCatalogForTherapy(id);
-
       const nextCat = catalogs[String(id)] || { subtherapies: [], tests: [] };
+
       const sp = {};
       for (const s of nextCat.subtherapies || []) sp[String(s._id)] = "";
       setSubPick(sp);
@@ -59,96 +57,81 @@ export default function AddItemsModal({
     }
   };
 
-const addPicked = async () => {
-  setAddError("");
-  if (!caseId) return setAddError("Case missing. Please select a case first.");
-  if (!therapyId) return setAddError("Select a therapy first.");
+  const addPicked = async () => {
+    setAddError("");
+    if (!caseId) return setAddError("Case missing. Please select a case first.");
+    if (!therapyId) return setAddError("Select a therapy first.");
 
-  const rows = [];
+    const tDoc = (therapyList || []).find((t) => String(t._id) === String(therapyId));
+    const therapy_name = tDoc?.name || "Therapy";
 
-  // ---------- build rows (UI list) ----------
-  for (const s of cat.subtherapies || []) {
-    const sid = String(s._id);
-    const raw = subPick[sid];
-    if (raw === "" || raw === null || raw === undefined) continue;
+    const apiItems = [];
 
-    const qty = clamp(toNum(raw, 1), 1, 999999);
-    rows.push(makeRowFromCatalog({ therapyId, therapyName: null, kind: "SUB", doc: s, qty }));
-  }
+    // SUB
+    for (const s of cat.subtherapies || []) {
+      const sid = String(s._id);
+      const raw = subPick[sid];
+      if (raw === "" || raw === null || raw === undefined) continue;
 
-  for (const t of cat.tests || []) {
-    const xid = String(t._id);
-    if (!testPick[xid]) continue;
-    rows.push(makeRowFromCatalog({ therapyId, therapyName: null, kind: "TEST", doc: t, qty: 1 }));
-  }
+      const sessions_count = clamp(toNum(raw, 1), 1, 999999);
+      const basePrice = toNum(s?.price_per_session ?? s?.pricePerSession, 0);
+      const pct = computeDiscountPercent(s?.discountSlabs, sessions_count);
+      const discount = round2(basePrice * sessions_count * (pct / 100));
 
-  if (!rows.length) return setAddError("Select at least 1 sub-therapy (qty) or test.");
+      apiItems.push({
+        item_type: "SUB",
+        therapyId: String(therapyId),
+        therapy_name,
+        subTherapyId: sid,
+        name: s?.name || "Sub-therapy",
+        duration_mins: s?.duration_mins ?? s?.duration ?? null,
+        price_per_session: basePrice,
+        sessions_count,
+        discount_percent: pct,
+        discount,
+        status: "active",
+      });
+    }
 
-  // ---------- build API payload (grouped by therapyId) ----------
-  const subTherapyPayload = [];
-  for (const s of cat.subtherapies || []) {
-    const sid = String(s._id);
-    const raw = subPick[sid];
-    if (raw === "" || raw === null || raw === undefined) continue;
+    // TEST
+    for (const t of cat.tests || []) {
+      const xid = String(t._id);
+      if (!testPick[xid]) continue;
 
-    const sessions_count = clamp(toNum(raw, 1), 1, 999999);
-    const discount_percent = computeDiscountPercent(s?.discountSlabs, sessions_count);
+      const basePrice = toNum(t?.price_per_test ?? t?.pricePerTest, 0);
 
-    subTherapyPayload.push({
-      subTherapyId: sid,
-      sessions_count,
-      // optional (UI me fields nahi hai abhi)
-      start_date: undefined,
-      end_date: undefined,
-      discount_percent,
-    });
-  }
+      apiItems.push({
+        item_type: "TEST",
+        therapyId: String(therapyId),
+        therapy_name,
+        testId: xid,
+        name: t?.name || "Test",
+        price_per_test: basePrice,
+        discount_percent: 0,
+        discount: 0,
+        status: "active",
+      });
+    }
 
-  const testsPayload = [];
-  for (const t of cat.tests || []) {
-    const xid = String(t._id);
-    if (!testPick[xid]) continue;
-    testsPayload.push({ testId: xid });
-  }
+    if (!apiItems.length) return setAddError("Select at least 1 sub-therapy (qty) or test.");
 
-  const payload = {
-    mode: "append", // ✅ duplicates allow (new entry)
-    items: [
-      {
-        therapyId,
-        subTherapy: subTherapyPayload,
-        therapyTestsEnabled: testsPayload.length > 0,
-        tests: testsPayload,
-      },
-    ],
+    try {
+      setSaving(true);
+
+      // ✅ Save into DB line-items
+      await api.post(`/cases/${caseId}/line-items`, { items: apiItems });
+
+      // ✅ Refetch in parent
+      if (onItemsAdded) await onItemsAdded();
+
+      onClose();
+    } catch (e) {
+      console.error(e);
+      setAddError(e?.response?.data?.message || "Failed to add items.");
+    } finally {
+      setSaving(false);
+    }
   };
-
-  // ---------- CALL API ----------
-  try {
-    setSaving(true);
-
-    // ✅ Use the route you finalized:
-    // If you used: POST /cases/:caseId/add-items
-    await api.post(`/cases/${caseId}/add-items`, payload);
-
-    // (if you used /addItemsToCasePlan/:caseId, then:)
-    // await api.post(`/addItemsToCasePlan/${caseId}`, payload);
-
-    // ✅ update billing UI list
-    makeNewCustomRows(rows);
-
-    // ✅ refresh caseDetail so plan updates reflect
-    if (onItemsAdded) await onItemsAdded();
-
-    onClose();
-  } catch (e) {
-    console.error(e);
-    setAddError(e?.response?.data?.error || e?.response?.data?.message || "Failed to add items.");
-  } finally {
-    setSaving(false);
-  }
-};
-
 
   if (!open) return null;
 
@@ -160,15 +143,11 @@ const addPicked = async () => {
             <div>
               <div className="font-extrabold text-slate-900">Add Items</div>
               <div className="text-xs text-slate-500">
-                Same item dubara add karoge to new row banegi (qty merge nahi hoga).
+                Selected items case ke <b>Line Items</b> me save honge.
               </div>
             </div>
 
-            <button
-              type="button"
-              className="text-slate-600 hover:text-slate-900 px-3 py-2 rounded-lg"
-              onClick={onClose}
-            >
+            <button type="button" className="text-slate-600 hover:text-slate-900 px-3 py-2 rounded-lg" onClick={onClose}>
               ✕
             </button>
           </div>
@@ -284,10 +263,7 @@ const addPicked = async () => {
                                   maxWidth={360}
                                   delay={[80, 0]}
                                 >
-                                  <button
-                                    type="button"
-                                    className="text-xs px-3 py-2 rounded-xl border border-slate-200 text-slate-700 hover:bg-white"
-                                  >
+                                  <button type="button" className="text-xs px-3 py-2 rounded-xl border border-slate-200 text-slate-700 hover:bg-white">
                                     View
                                   </button>
                                 </Tippy>
@@ -334,10 +310,7 @@ const addPicked = async () => {
                     const price = toNum(t.price_per_test ?? t.pricePerTest, 0);
 
                     return (
-                      <label
-                        key={xid}
-                        className="flex items-center gap-2 border border-slate-200 rounded-xl p-3 hover:bg-slate-50"
-                      >
+                      <label key={xid} className="flex items-center gap-2 border border-slate-200 rounded-xl p-3 hover:bg-slate-50">
                         <input
                           type="checkbox"
                           checked={checked}
@@ -365,14 +338,15 @@ const addPicked = async () => {
             >
               Cancel
             </button>
-          <button
-  type="button"
-  className="px-6 py-3 rounded-xl text-white font-extrabold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60"
-  onClick={addPicked}
-  disabled={saving || catalogLoading[String(therapyId)]}
->
-  {saving ? "Adding..." : "Add Selected"}
-</button>
+
+            <button
+              type="button"
+              className="px-6 py-3 rounded-xl text-white font-extrabold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60"
+              onClick={addPicked}
+              disabled={saving || catalogLoading[String(therapyId)]}
+            >
+              {saving ? "Adding..." : "Add Selected"}
+            </button>
           </div>
         </div>
       </div>

@@ -1,6 +1,16 @@
-// src/pages/billing/components/ItemRow.jsx
-import React from "react";
+import React, { useMemo } from "react";
 import { inr } from "./_billingUtils";
+
+function billedTooltip(billedInfo) {
+  if (!billedInfo?.count) return "Not billed yet. Remove is allowed.";
+  const invs = Array.isArray(billedInfo.invoiceNumbers)
+    ? billedInfo.invoiceNumbers
+    : [];
+  const more = invs.length > 3 ? ` +${invs.length - 3} more` : "";
+  const top = invs.slice(0, 3).join(", ");
+  return `Already billed in ${billedInfo.count} invoice(s): ${top}${more}. Remove disabled.`;
+}
+
 export default function ItemRow({
   it,
   idx,
@@ -14,7 +24,13 @@ export default function ItemRow({
   onRemove,
   onDuplicate,
 }) {
-  const isPlan = it.source === "PLAN";
+  const isPlan = it.source === "PLAN" || it.source === "DB";
+
+  const removeTitle = useMemo(() => {
+    if (canRemove)
+      return isPlan ? "Remove from case line-items" : "Remove this row";
+    return billedTooltip(billedInfo);
+  }, [canRemove, billedInfo, isPlan]);
 
   return (
     <tr className="border-b last:border-b-0 hover:bg-slate-50/60">
@@ -31,7 +47,9 @@ export default function ItemRow({
           </div>
 
           <div className="min-w-0">
-            <div className="font-semibold text-slate-900 truncate">{it.displayName}</div>
+            <div className="font-semibold text-slate-900 truncate">
+              {it.displayName}
+            </div>
 
             <div className="mt-1 flex items-center gap-2 flex-wrap">
               <span
@@ -46,7 +64,7 @@ export default function ItemRow({
 
               {isPlan ? (
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-50 text-slate-700 border border-slate-200">
-                  Plan
+                  Case Item
                 </span>
               ) : (
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
@@ -54,15 +72,7 @@ export default function ItemRow({
                 </span>
               )}
 
-              <button
-                type="button"
-                onClick={onDuplicate}
-                className="text-[11px] px-2 py-0.5 rounded-full border border-slate-200 text-slate-700 hover:bg-white"
-                title="Duplicate as new row"
-              >
-                Duplicate
-              </button>
-
+              {/* ✅ Remove button: disabled if billed */}
               <button
                 type="button"
                 onClick={onRemove}
@@ -74,14 +84,32 @@ export default function ItemRow({
                 }`}
                 title={
                   canRemove
-                    ? isPlan
-                      ? "Hide from billing list"
-                      : "Remove this row"
-                    : "Already billed earlier, remove disabled"
+                    ? "Remove this item from case line-items"
+                    : `Already billed in invoice(s): ${(
+                        billedInfo?.invoiceNumbers || []
+                      )
+                        .slice(0, 5)
+                        .join(", ")}${
+                        (billedInfo?.invoiceNumbers || []).length > 5
+                          ? "..."
+                          : ""
+                      }`
                 }
               >
                 Remove
               </button>
+
+              {/* optional duplicate */}
+              {onDuplicate ? (
+                <button
+                  type="button"
+                  onClick={onDuplicate}
+                  className="text-[11px] px-2 py-0.5 rounded-full border border-slate-200 text-slate-700 hover:bg-white"
+                  title="Duplicate as a new row"
+                >
+                  Duplicate
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -93,22 +121,31 @@ export default function ItemRow({
           type="number"
           min="1"
           step="1"
+     disabled={!canRemove}
           value={qtyValue}
           onChange={(e) => onQtyChange(e.target.value)}
           className="w-28 rounded-lg border border-slate-200 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-400"
         />
-        <div className="text-[11px] text-slate-500 mt-1">Type qty first, then tick ✅</div>
+        <div className="text-[11px] text-slate-500 mt-1">
+          Type qty first, then tick ✅
+        </div>
       </td>
 
       {/* Discount */}
       <td className="py-3 pr-4 w-40">
-        <div className="font-semibold text-slate-900">{pricing.discountPct || 0}%</div>
-        <div className="text-[11px] text-slate-500">{inr(pricing.rowDiscount || 0)}</div>
+        <div className="font-semibold text-slate-900">
+          {pricing.discountPct || 0}%
+        </div>
+        <div className="text-[11px] text-slate-500">
+          {inr(pricing.rowDiscount || 0)}
+        </div>
       </td>
 
       {/* Total */}
       <td className="py-3 pr-4 w-44">
-        <div className="font-bold text-slate-900">{inr(pricing.rowTotal || 0)}</div>
+        <div className="font-bold text-slate-900">
+          {inr(pricing.rowTotal || 0)}
+        </div>
         <div className="text-[11px] text-slate-500">Net</div>
       </td>
 
@@ -116,7 +153,10 @@ export default function ItemRow({
       <td className="py-3 pr-4 w-72">
         <div className="flex flex-wrap gap-2">
           {billedInfo?.count ? (
-            <span className="text-xs px-2 py-1 rounded-lg bg-amber-50 text-amber-700 border border-amber-200">
+            <span
+              className="text-xs px-2 py-1 rounded-lg bg-amber-50 text-amber-700 border border-amber-200"
+              title={billedTooltip(billedInfo)}
+            >
               Billed before ({billedInfo.count})
             </span>
           ) : (

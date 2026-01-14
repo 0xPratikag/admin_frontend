@@ -1,28 +1,38 @@
-// src/pages/billing/GenerateBill.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import axios from "axios";
 
 import { buildAxios, clamp, inr, makeKey, round2, toNum } from "./_billingUtils";
-
 import useBillingData from "./hooks/useBillingData";
 import { resolvePricing, resolveQtyFromOverrides } from "./billingHelpers";
-import { makeRowId, stablePlanRowId } from "./hooks/useBillingStorage";
 
 import ItemsTable from "./ItemsTable";
 import AddItemsModal from "./AddItemsModal";
 
-// =====================
-// ROUTES
-// =====================
-const ROUTE_ALL_INVOICES = (caseId) => `/admin/case-invoices/${caseId}`;
-
-const emptyDraft = {
-  selectedRowIds: [],
-  overrides: {},
-  customAdds: [],
-  hiddenBaseKeys: [],
+const ROUTE_ALL_INVOICES = (caseId) => `/admin/invoices?caseId=${caseId}`;
+const findSubTherapyInCatalog = (cat, subId) => {
+  const s = String(subId);
+  const list =
+    cat?.subtherapies ||        // ✅ ADD THIS (your actual key)
+    cat?.subTherapies ||
+    cat?.sub_therapies ||
+    cat?.data?.subTherapies ||
+    cat?.data?.subtherapies ||
+    [];
+  return list.find((x) => String(x._id || x.id) === s) || null;
 };
+
+
+const findTestInCatalog = (cat, testId) => {
+  const t = String(testId);
+  const list =
+    cat?.tests ||
+    cat?.testList ||
+    cat?.data?.tests ||
+    [];
+  return list.find((x) => String(x._id || x.id) === t) || null;
+};
+
 
 export default function GenerateBill() {
   const { caseId: caseIdFromRoute } = useParams();
@@ -42,6 +52,11 @@ export default function GenerateBill() {
     caseDetailLoading,
     caseDetailError,
     fetchCaseDetail,
+
+    lineItems,
+    lineItemsLoading,
+    lineItemsError,
+    fetchLineItems,
 
     invoices,
     invoicesLoading,
@@ -63,6 +78,9 @@ export default function GenerateBill() {
   const [caseSearch, setCaseSearch] = useState("");
   const [selectedCaseId, setSelectedCaseId] = useState(caseIdFromRoute || prefilledCase?._id || "");
 
+
+
+
   const selectedCaseBrief = useMemo(
     () => cases.find((c) => c._id === selectedCaseId) || prefilledCase || null,
     [cases, selectedCaseId, prefilledCase]
@@ -75,18 +93,22 @@ export default function GenerateBill() {
   const [selectedRowIds, setSelectedRowIds] = useState([]);
   const [overrides, setOverrides] = useState({}); // rowId -> { qty }
 
-  // custom rows
-  const [customAdds, setCustomAdds] = useState([]);
-
-  // hidden plan items (baseKey)
-  const [hiddenBaseKeys, setHiddenBaseKeys] = useState([]);
-
   // add modal
   const [addOpen, setAddOpen] = useState(false);
 
-  // draft state flags
-  const draftLoadedRef = useRef(false);
-  const savingDraftRef = useRef(false);
+
+useEffect(() => {
+  if (!lineItems?.length) return;
+
+  const therapyIds = Array.from(
+    new Set(lineItems.map((x) => String(x.therapyId)).filter(Boolean))
+  );
+
+  therapyIds.forEach((tid) => {
+    if (!catalogs?.[tid]) loadCatalogForTherapy(tid);
+  });
+}, [lineItems, catalogs, loadCatalogForTherapy]);
+
 
   // =====================
   // Init
@@ -104,199 +126,120 @@ export default function GenerateBill() {
   }, [caseSearch]);
 
   // =====================
-  // Load case + draft (server)
+  // When case changes → fetch everything fresh from API
   // =====================
   useEffect(() => {
-    let alive = true;
-    async function boot() {
-      if (!selectedCaseId) return;
+    if (!selectedCaseId) return;
 
-      setErrorMsg("");
-      draftLoadedRef.current = false;
+    setErrorMsg("");
 
-      // load case + invoices
-      fetchCaseDetail(selectedCaseId);
-      fetchInvoices(selectedCaseId);
+    // reset selections when switching case
+    setSelectedRowIds([]);
+    setOverrides({});
 
-      // billed map from invoices
-      hydrateBilledMap(selectedCaseId, (x) => makeKey(x));
+    fetchCaseDetail(selectedCaseId);
+    fetchLineItems(selectedCaseId, "active");
+    fetchInvoices(selectedCaseId);
+    hydrateBilledMap(selectedCaseId, (x) => makeKey(x));
 
-      // load draft
-      try {
-        const { data } = await api.get(`/cases/${selectedCaseId}/billing-draft`);
-        const d = data?.draft || data; // support both shapes
-
-        if (!alive) return;
-
-        setSelectedRowIds(Array.isArray(d?.selectedRowIds) ? d.selectedRowIds : []);
-        setOverrides(d?.overrides && typeof d.overrides === "object" ? d.overrides : {});
-        setCustomAdds(Array.isArray(d?.customAdds) ? d.customAdds : []);
-        setHiddenBaseKeys(Array.isArray(d?.hiddenBaseKeys) ? d.hiddenBaseKeys : []);
-      } catch (e) {
-        // if no draft found -> empty
-        if (!alive) return;
-        setSelectedRowIds([]);
-        setOverrides({});
-        setCustomAdds([]);
-        setHiddenBaseKeys([]);
-      } finally {
-        if (!alive) return;
-        draftLoadedRef.current = true;
-      }
-    }
-
-    boot();
-    return () => {
-      alive = false;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCaseId]);
 
   // =====================
-  // Autosave draft (debounced)
+  // Convert DB line-items -> selectable rows (ONLY API DATA)
   // =====================
-  useEffect(() => {
-    if (!selectedCaseId) return;
-    if (!draftLoadedRef.current) return;
+const allSelectableItems = useMemo(() => {
+  const out = [];
 
-    const t = setTimeout(async () => {
-      if (savingDraftRef.current) return;
-      savingDraftRef.current = true;
+  for (const li of lineItems || []) {
+    if (li.status && li.status !== "active") continue;
 
-      try {
-        await api.put(`/cases/${selectedCaseId}/billing-draft`, {
-          selectedRowIds,
-          overrides,
-          customAdds,
-          hiddenBaseKeys,
-          clientUpdatedAt: new Date().toISOString(),
-        });
-      } catch (e) {
-        // silent (avoid annoying UI spam)
-        console.error("draft save failed", e);
-      } finally {
-        savingDraftRef.current = false;
-      }
-    }, 500);
+    // ✅ SUB
+    if (li.item_type === "SUB") {
+      const therapyId = String(li.therapyId);
+      const subId = String(li.subTherapyId);
 
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCaseId, selectedRowIds, overrides, customAdds, hiddenBaseKeys]);
+      const baseKey = makeKey({
+        type: "THERAPY",
+        itemId: therapyId,
+        subItemId: subId,
+      });
 
-  // pre-load catalogs for therapy_plan therapies
-  useEffect(() => {
-    const blocks = caseDetail?.therapy_plan;
-    if (!Array.isArray(blocks) || !blocks.length) return;
+      const cat = catalogs?.[therapyId];
+      const sub = findSubTherapyInCatalog(cat, subId);
 
-    const ids = Array.from(new Set(blocks.map((b) => String(b?.therapyId || "")).filter(Boolean)));
-    ids.forEach((tid) => loadCatalogForTherapy(tid));
-  }, [caseDetail, loadCatalogForTherapy]);
+      const slabs =
+        sub?.discountSlabs ||  
+        sub?.slabs ||
+        sub?.pricing_slabs ||
+        sub?.pricing?.slabs ||
+        [];
 
-  // =====================
-  // Helpers
-  // =====================
-  const therapyNameById = useMemo(() => {
-    const m = {};
-    for (const t of therapyList || []) m[String(t._id)] = t.name;
-    return m;
-  }, [therapyList]);
-
-  // plan items
-  const planItems = useMemo(() => {
-    const out = [];
-    const blocks = caseDetail?.therapy_plan;
-    if (!Array.isArray(blocks)) return out;
-
-    for (const blk of blocks) {
-      const therapyId = String(blk?.therapyId || "");
-      if (!therapyId) continue;
-
-      const therapyName = therapyNameById[therapyId] || blk?.therapy_name || "Therapy";
-      const cat = catalogs[therapyId] || { subtherapies: [], tests: [] };
-
-      const subById = Object.fromEntries((cat.subtherapies || []).map((s) => [String(s._id), s]));
-      const testById = Object.fromEntries((cat.tests || []).map((t) => [String(t._id), t]));
-
-      // subs
-      const subs = Array.isArray(blk?.subTherapy) ? blk.subTherapy : [];
-      for (const row of subs) {
-        const subTherapyId = String(row?.subTherapyId || "");
-        if (!subTherapyId) continue;
-
-        const qty = clamp(toNum(row?.sessions_count, 1), 1, 999999);
-
-        const subDoc = subById[subTherapyId];
-        const subName = subDoc?.name || row?.name || "Sub-therapy";
-        const basePrice = toNum(
-          subDoc?.price_per_session ?? subDoc?.pricePerSession ?? row?.price_per_session,
-          0
-        );
-
-        const baseKey = makeKey({ type: "THERAPY", itemId: therapyId, subItemId: subTherapyId });
-
-        out.push({
-          source: "PLAN",
-          type: "THERAPY",
-          itemId: therapyId,
-          subItemId: subTherapyId,
-          baseKey,
-          rowId: stablePlanRowId(baseKey),
-          displayName: `${therapyName} • ${subName}`,
-          qty,
-          meta: {
-            basePrice,
-            slabs: subDoc?.discountSlabs || [],
-            durationMins: subDoc?.duration_mins ?? subDoc?.duration ?? null,
-          },
-        });
-      }
-
-      // tests
-      if (blk?.therapyTestsEnabled) {
-        const tests = Array.isArray(blk?.tests) ? blk.tests : [];
-        for (const t of tests) {
-          const testId = String(t?.testId || "");
-          if (!testId) continue;
-
-          const testDoc = testById[testId];
-          const name = testDoc?.name || t?.name || "Test";
-          const basePrice = toNum(
-            testDoc?.price_per_test ?? testDoc?.pricePerTest ?? t?.price_per_test,
-            0
-          );
-
-          const baseKey = makeKey({ type: "TEST", itemId: testId, subItemId: null });
-
-          out.push({
-            source: "PLAN",
-            type: "TEST",
-            itemId: testId,
-            subItemId: null,
-            baseKey,
-            rowId: stablePlanRowId(baseKey),
-            displayName: `${name} • (${therapyName})`,
-            qty: 1,
-            meta: { basePrice, slabs: [] },
-          });
-        }
-      }
+      out.push({
+        source: "DB",
+        dbId: li._id,
+        type: "THERAPY",
+        itemId: therapyId,
+        subItemId: subId,
+        baseKey,
+        rowId: `db_${li._id}`,
+        displayName: `${li.therapy_name || "Therapy"} • ${li.name || "Sub-therapy"}`,
+        qty: clamp(toNum(li.sessions_count, 1), 1, 999999),
+        meta: {
+          basePrice: toNum(li.price_per_session, 0),
+          slabs, // ✅ slabs attached
+          durationMins: li.duration_mins ?? null,
+        },
+        // optional: if backend sends these, keep them for remove/lock logic
+        invoiced_count: li.invoiced_count,
+        last_invoice_id: li.last_invoice_id,
+      });
     }
 
-    return out;
-  }, [caseDetail, catalogs, therapyNameById]);
+    // ✅ TEST
+    if (li.item_type === "TEST") {
+      const therapyId = String(li.therapyId);
+      const testId = String(li.testId);
 
-  // all rows (filter hidden PLAN)
-  const allSelectableItems = useMemo(() => {
-    const hiddenSet = new Set(hiddenBaseKeys || []);
-    const visiblePlan = (planItems || []).filter((x) => !hiddenSet.has(x.baseKey));
+      const baseKey = makeKey({
+        type: "TEST",
+        itemId: therapyId,
+        subItemId: testId,
+      });
 
-    const fixedCustom = (customAdds || []).map((x) => ({
-      ...x,
-      rowId: x.rowId || makeRowId("c"),
-    }));
+      const cat = catalogs?.[therapyId];
+      const test = findTestInCatalog(cat, testId);
 
-    return [...visiblePlan, ...fixedCustom];
-  }, [planItems, customAdds, hiddenBaseKeys]);
+      const slabs =
+        test?.slabs ||
+        test?.pricing_slabs ||
+        test?.pricing?.slabs ||
+        [];
+
+      out.push({
+        source: "DB",
+        dbId: li._id,
+        type: "TEST",
+        itemId: therapyId,
+        subItemId: testId,
+        baseKey,
+        rowId: `db_${li._id}`,
+        displayName: `${li.name || "Test"} • (${li.therapy_name || "Therapy"})`,
+        qty: 1,
+        meta: {
+          basePrice: toNum(li.price_per_test, 0),
+          slabs, // ✅ slabs attached
+          therapyId,
+        },
+        invoiced_count: li.invoiced_count,
+        last_invoice_id: li.last_invoice_id,
+      });
+    }
+  }
+
+  return out;
+}, [lineItems, catalogs]);
+
 
   // selected rows resolved
   const selectedItemsResolved = useMemo(() => {
@@ -326,9 +269,7 @@ export default function GenerateBill() {
   // Selection actions
   // =====================
   const toggleRow = (rowId) => {
-    setSelectedRowIds((prev) =>
-      prev.includes(rowId) ? prev.filter((x) => x !== rowId) : [...prev, rowId]
-    );
+    setSelectedRowIds((prev) => (prev.includes(rowId) ? prev.filter((x) => x !== rowId) : [...prev, rowId]));
   };
 
   const selectAll = () => setSelectedRowIds(allSelectableItems.map((x) => x.rowId));
@@ -342,145 +283,82 @@ export default function GenerateBill() {
   };
 
   // =====================
-  // Duplicate row
+  // Remove row: ALWAYS backend
   // =====================
-  const duplicateRow = (it) => {
-    const newRow = {
-      ...it,
-      source: "CUSTOM_DUP",
-      rowId: makeRowId("c"),
-      baseKey: it.baseKey || makeKey({ type: it.type, itemId: it.itemId, subItemId: it.subItemId }),
-    };
-
-    setCustomAdds((prev) => [...(prev || []), newRow]);
-    setSelectedRowIds((prev) => [...prev, newRow.rowId]);
-
-    const currentQty = resolveQtyFromOverrides(it.rowId, it, overrides);
-    setOverrides((prev) => ({ ...prev, [newRow.rowId]: { qty: String(currentQty) } }));
-  };
-
-  // Remove row (PLAN hide + CUSTOM delete) only if never billed
-  const removeRow = (it) => {
+  const removeRow = async (it) => {
     if (!it) return;
 
-    const billed = billedMap?.[it.baseKey];
-    if (billed?.count) {
-      setErrorMsg("❌ Ye item pehle kisi bill me ja chuka hai, isliye remove allowed nahi.");
-      return;
-    }
 
-    const isCustom =
-      it.source === "CUSTOM" || it.source === "CUSTOM_DUP" || it.source === "INVOICE_CLONE";
+  // ✅ HARD BLOCK: backend line-item fields (always correct)
+  if (Number(it.invoiced_count || 0) > 0 || it.last_invoice_id) {
+    setErrorMsg("❌ Ye item already invoice me aa chuka hai. Remove allowed nahi hai.");
+    return;
+  }
 
-    if (isCustom) {
-      setCustomAdds((prev) => (prev || []).filter((x) => x.rowId !== it.rowId));
-    } else {
-      setHiddenBaseKeys((prev) => Array.from(new Set([...(prev || []), it.baseKey])));
-    }
+  const billed = billedMap?.[it.baseKey];
+  if (billed?.count) {
+    setErrorMsg(
+      `❌ Ye item pehle invoice me billed ho chuka hai. Remove allowed nahi. (Invoices: ${(billed.invoiceNumbers || [])
+        .slice(0, 3)
+        .join(", ")}${(billed.invoiceNumbers || []).length > 3 ? "..." : ""})`
+    );
+    return;
+  }
 
-    setSelectedRowIds((prev) => prev.filter((k) => k !== it.rowId));
-    setOverrides((prev) => {
-      const next = { ...prev };
-      delete next[it.rowId];
-      return next;
-    });
-  };
-
-  // =====================
-  // Add modal helpers
-  // =====================
-  const openAddModal = async () => {
-    setAddOpen(true);
     try {
-      await fetchTherapies();
-    } catch {}
-  };
+      if (!selectedCaseId || !it.dbId) {
+        setErrorMsg("❌ Missing caseId/itemId for backend removal.");
+        return;
+      }
 
-  const makeRowFromCatalog = ({ therapyId, kind, doc, qty }) => {
-    const tid = String(therapyId);
-    const tDoc = (therapyList || []).find((t) => String(t._id) === tid);
-    const therapyName = tDoc?.name || "Therapy";
+      await api.delete(`/cases/${selectedCaseId}/line-items/${it.dbId}`);
+      await fetchLineItems(selectedCaseId, "active");
 
-    if (kind === "SUB") {
-      const sid = String(doc._id);
-      const baseKey = makeKey({ type: "THERAPY", itemId: tid, subItemId: sid });
-      const basePrice = toNum(doc?.price_per_session ?? doc?.pricePerSession, 0);
-
-      return {
-        source: "CUSTOM",
-        type: "THERAPY",
-        itemId: tid,
-        subItemId: sid,
-        baseKey,
-        rowId: makeRowId("c"),
-        displayName: `${therapyName} • ${doc?.name || "Sub-therapy"}`,
-        qty,
-        meta: {
-          basePrice,
-          slabs: doc?.discountSlabs || [],
-          durationMins: doc?.duration_mins ?? doc?.duration ?? null,
-        },
-      };
+      // cleanup selection/override
+      setSelectedRowIds((prev) => prev.filter((k) => k !== it.rowId));
+      setOverrides((prev) => {
+        const next = { ...prev };
+        delete next[it.rowId];
+        return next;
+      });
+    } catch (e) {
+      console.error(e);
+      setErrorMsg(e?.response?.data?.message || "❌ Failed to remove item.");
     }
-
- // TEST row
-const xid = String(doc._id);
-const baseKey = makeKey({ type: "TEST", itemId: xid, subItemId: null });
-const basePrice = toNum(doc?.price_per_test ?? doc?.pricePerTest, 0);
-
-return {
-  source: "CUSTOM",
-  type: "TEST",
-  itemId: xid,
-  subItemId: null,
-  baseKey,
-  rowId: makeRowId("c"),
-  displayName: `${doc?.name || "Test"} • (${therapyName})`,
-  qty: 1,
-  meta: { basePrice, slabs: [], therapyId: tid }, // ✅ ADD therapyId here
-};
-
-  };
-
-  const makeNewCustomRows = (rows) => {
-    setCustomAdds((prev) => [...(prev || []), ...(rows || [])]);
-    setSelectedRowIds((prev) => [...prev, ...(rows || []).map((r) => r.rowId)]);
-    setOverrides((prev) => {
-      const next = { ...prev };
-      for (const r of rows || []) next[r.rowId] = { qty: String(r.qty) };
-      return next;
-    });
   };
 
   // =====================
-  // Reuse selection from invoice (clone as new rows)
+  // Reuse selection from invoice (NO new rows) -> auto select matching baseKeys
   // =====================
   const useFromInvoice = async (invoiceId) => {
     if (!invoiceId) return;
     try {
       const { data } = await api.get(`/invoices/${invoiceId}`);
-      const items = Array.isArray(data?.current?.items) ? data.current.items : [];
+      const inv = data?.data || data;
+      const items = Array.isArray(inv?.current?.items) ? inv.current.items : [];
 
-      const newRows = [];
+      const baseKeyToRow = new Map(allSelectableItems.map((r) => [r.baseKey, r]));
+      const nextSelected = new Set(selectedRowIds);
+      const nextOverrides = { ...overrides };
+
+      let matched = 0;
       for (const it of items) {
         const baseKey = makeKey({ type: it.type, itemId: it.itemId, subItemId: it.subItemId });
-        const template = allSelectableItems.find((x) => x.baseKey === baseKey) || null;
+        const row = baseKeyToRow.get(baseKey);
+        if (!row) continue;
 
-        const rowId = makeRowId("c");
-        newRows.push({
-          source: "INVOICE_CLONE",
-          type: it.type,
-          itemId: it.itemId,
-          subItemId: it.subItemId || null,
-          baseKey,
-          rowId,
-          displayName: template?.displayName || it?.name || "Item",
-          qty: clamp(toNum(it.qty, 1), 1, 999999),
-          meta: template?.meta || { basePrice: toNum(it.basePrice ?? it.unitPrice, 0), slabs: [] },
-        });
+        nextSelected.add(row.rowId);
+        nextOverrides[row.rowId] = { qty: String(it.qty ?? row.qty ?? 1) };
+        matched += 1;
       }
 
-      if (newRows.length) makeNewCustomRows(newRows);
+      if (!matched) {
+        setErrorMsg("⚠️ Invoice items ka match current case line-items me nahi mila.");
+        return;
+      }
+
+      setSelectedRowIds(Array.from(nextSelected));
+      setOverrides(nextOverrides);
     } catch (e) {
       console.error(e);
       setErrorMsg("Failed to load invoice items for selection.");
@@ -488,68 +366,65 @@ return {
   };
 
   // =====================
-  // Generate invoice (DIRECT)
+  // Generate invoice
   // =====================
-  const generateInvoice = async () => {
-    setErrorMsg("");
-    if (!selectedCaseId) return setErrorMsg("Please select a case.");
-    if (!selectedItemsResolved.length) return setErrorMsg("Please tick at least 1 item.");
+const generateInvoice = async () => {
+  setErrorMsg("");
+  if (!selectedCaseId) return setErrorMsg("Please select a case.");
+  if (!selectedItemsResolved.length) return setErrorMsg("Please tick at least 1 item.");
 
-    try {
-      setSaving(true);
+  // ✅ DB-only flow => must have dbId for every selected item
+  const missing = selectedItemsResolved.find((x) => !x.dbId);
+  if (missing) {
+    return setErrorMsg("❌ Some selected rows are not saved in server line-items. Please add them first.");
+  }
 
-      const itemsPayload = selectedItemsResolved.map((it) => ({
-        type: it.type,
-        itemId: it.itemId,
-        subItemId: it.subItemId || null,
-        name: it.displayName,
-        qty: it.qty,
-        unitPrice: it.unitNet,
-        discountPercent: it.discountPct,
-        basePrice: it.basePrice,
-        clientRowId: it.rowId,
-        baseKey: it.baseKey,
+  try {
+    setSaving(true);
 
-        
-  // ✅ important for TEST item_code
-  therapyId: it.type === "TEST" ? it?.meta?.therapyId : undefined,
-      }));
+    // ✅ BACKEND expects: items[{ caseItemId, units }]
+    const itemsPayload = selectedItemsResolved.map((it) => ({
+      caseItemId: it.dbId,  // ✅ CaseItem _id
+      units: it.qty,        // ✅ SUB sessions / TEST qty
+    }));
 
-      const res = await api.post(`/cases/${selectedCaseId}/invoices`, {
-        taxRate: 0,
-        items: itemsPayload,
-        summary: { ...summary, currency: "INR" },
-      });
+    const res = await api.post(`/cases/${selectedCaseId}/invoices`, {
+      tax_percent: 0,        // ✅ backend field name
+      notes: "",             // optional
+      items: itemsPayload,
+    });
 
-      const data = res.data;
-      const invoiceId = data?.invoiceId || data?._id;
+    const created = res.data?.data || res.data;
+    const invoiceId = created?._id || created?.invoiceId;
 
-      // refresh invoices + billedMap
-      await fetchInvoices(selectedCaseId);
-      await hydrateBilledMap(selectedCaseId, (x) => makeKey(x));
+    // refresh everything
+    await fetchInvoices(selectedCaseId);
+    await hydrateBilledMap(selectedCaseId, (x) => makeKey(x));
+    await fetchLineItems(selectedCaseId, "active");
 
-      // ✅ clear draft after success (so old selections don't stick)
-      try {
-        await api.delete(`/cases/${selectedCaseId}/billing-draft`);
-      } catch {}
+    // clear selection after success
+    setSelectedRowIds([]);
+    setOverrides({});
 
-      // reset UI draft state (optional)
-      setSelectedRowIds([]);
-      setOverrides({});
-      setCustomAdds([]);
-      setHiddenBaseKeys([]);
-
-      if (invoiceId) {
-        navigate(`/admin/bill-details/${invoiceId}`, { state: { caseId: selectedCaseId } });
-      } else {
-        alert("✅ Invoice generated.");
-      }
-    } catch (e) {
-      console.error(e);
-      setErrorMsg(e?.response?.data?.message || "❌ Failed to generate invoice.");
-    } finally {
-      setSaving(false);
+    if (invoiceId) {
+      navigate(`/admin/bill-details/${invoiceId}`, { state: { caseId: selectedCaseId } });
+    } else {
+      alert("✅ Invoice generated.");
     }
+  } catch (e) {
+    console.error(e);
+    setErrorMsg(e?.response?.data?.message || "❌ Failed to generate invoice.");
+  } finally {
+    setSaving(false);
+  }
+};
+
+
+  const openAddModal = async () => {
+    setAddOpen(true);
+    try {
+      await fetchTherapies();
+    } catch {}
   };
 
   // =====================
@@ -562,7 +437,7 @@ return {
           <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-slate-900">
             Generate Bill / Create Invoice
           </h1>
-          <div className="mt-2 text-sm text-slate-500">Direct Generate ✅ (Draft saved on server)</div>
+          <div className="mt-2 text-sm text-slate-500">API-based ✅ (No localStorage)</div>
         </div>
 
         {errorMsg ? (
@@ -614,10 +489,7 @@ return {
                   <span>
                     Patient:{" "}
                     <span className="font-semibold text-slate-800">
-                      {caseDetail?.patient_name ||
-                        selectedCaseBrief?.patient_name ||
-                        selectedCaseBrief?.p_id ||
-                        "—"}
+                      {caseDetail?.patient_name || selectedCaseBrief?.patient_name || selectedCaseBrief?.p_id || "—"}
                     </span>
                   </span>
 
@@ -637,14 +509,14 @@ return {
                     disabled={!invoices?.length}
                     onChange={(e) => useFromInvoice(e.target.value)}
                     defaultValue=""
-                    title="Reuse from invoice (creates NEW rows)"
+                    title="Reuse selections from invoice (auto-select matching items)"
                   >
                     <option value="" disabled>
                       Reuse from invoice…
                     </option>
                     {(invoices || []).map((inv) => (
-                      <option key={inv.invoiceId} value={inv.invoiceId}>
-                        {inv.invoiceNumber} (v{inv.currentVersionNo})
+                      <option key={inv.invoiceId || inv._id} value={inv.invoiceId || inv._id}>
+                        {inv.invoiceNumber || inv._id} (v{inv.currentVersionNo || 1})
                       </option>
                     ))}
                   </select>
@@ -669,7 +541,7 @@ return {
 
               <button
                 type="button"
-                onClick={() => selectedCaseId && navigate(ROUTE_ALL_INVOICES(selectedCaseId))}
+               onClick={() => selectedCaseId && navigate(ROUTE_ALL_INVOICES(selectedCaseId))}
                 disabled={!selectedCaseId}
                 className={`px-5 py-3 rounded-xl border font-semibold ${
                   selectedCaseId
@@ -713,6 +585,8 @@ return {
 
           <div className="px-5 py-3 text-xs text-slate-500">
             {caseDetailLoading ? "Loading case…" : caseDetailError ? caseDetailError : null}
+            {lineItemsLoading ? " • Loading line items…" : null}
+            {lineItemsError ? ` • ${lineItemsError}` : null}
             {invoicesLoading ? " • Loading invoices…" : null}
           </div>
 
@@ -727,7 +601,6 @@ return {
               onQtyChange={onQtyChange}
               billedMap={billedMap}
               onRemoveRow={removeRow}
-              onDuplicateRow={duplicateRow}
             />
           )}
         </div>
@@ -789,20 +662,17 @@ return {
       <AddItemsModal
         open={addOpen}
         onClose={() => setAddOpen(false)}
-  api={api}                     // ✅
-  caseId={selectedCaseId}        // ✅
-  onItemsAdded={async () => {    // ✅ refresh case
-    await fetchCaseDetail(selectedCaseId);
-    // (optional) plan me new therapy aaya to catalog pre-load will run via effect
-  }}
-        
+        api={api}
+        caseId={selectedCaseId}
+        onItemsAdded={async () => {
+          await fetchCaseDetail(selectedCaseId);
+          await fetchLineItems(selectedCaseId, "active");
+        }}
         therapyList={therapyList}
         therapyLoading={therapyLoading}
         catalogs={catalogs}
         catalogLoading={catalogLoading}
         loadCatalogForTherapy={loadCatalogForTherapy}
-        makeNewCustomRows={makeNewCustomRows}
-        makeRowFromCatalog={makeRowFromCatalog}
       />
     </div>
   );
