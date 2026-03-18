@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { useSelector } from "react-redux";
 
-import DashboardBase from "./DashboardBase";
+import BranchDashboard from "./BranchDashboard";
 import Sidebar from "./Sidebar";
 import CreateCase from "./Cases/CreateCase";
 import ViewAllCase from "./Cases/ViewAllCase";
@@ -138,7 +138,7 @@ const DashboardRouting = () => {
   );
 
   const ROUTES = [
-    { path: "/admin/dashboard", element: <DashboardBase />, key: "dashboard" },
+    { path: "/admin/dashboard", element: <BranchDashboard />, key: "dashboard" },
 
     // Billing
     { path: "/admin/billing/generate-bill", element: <GenerateBill />, key: "generate_bill" },
